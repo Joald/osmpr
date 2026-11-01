@@ -10,7 +10,7 @@
 
   How it works:
     1. Anyone builds a link with the intended change encoded
-       in the URL. See the "Link format" section at the bottom of the page
+       in the URL. See the help dialog (?) in the title bar
        and README.md for the exact format.
     2. This page fetches the CURRENT objects from the OSM API (public read),
        applies the operations, and shows a diff preview.
@@ -73,13 +73,20 @@
   summary { cursor: pointer; }
   #log p { margin: 4px 0; }
   footer { padding-bottom: 32px; }
+  dialog { background: #1a1d21; color: #e8e8e8; border: 1px solid #2a2e33; border-radius: 10px; max-width: 860px; padding: 20px; }
+  dialog::backdrop { background: rgba(0,0,0,0.65); }
+  #helpBtn { min-width: 38px; padding: 8px 0; text-align: center; border-radius: 50%; font-weight: bold; }
   a { color: #7fb3e8; }
 </style>
 </head>
 <body>
 <header>
-  <h1>OSMPR</h1>
-  <p class="muted">Open a prefill link, check the diff, click Upload. One changeset, no desktop editor, no Level0 syntax.</p>
+  <div class="row">
+    <h1 style="margin:0">OSMPR</h1>
+    <span style="flex:1"></span>
+    <button id="helpBtn" type="button" class="secondary" title="Help — link format">?</button>
+  </div>
+  <p class="muted">Open a link, check the change, click Upload.</p>
   <div id="authBar" class="panel row">
     <span id="authStatus" class="muted">Checking login…</span>
     <span style="flex:1"></span>
@@ -88,30 +95,6 @@
   </div>
 </header>
 <main>
-  <section id="setupPanel" class="panel warn" hidden>
-    <h2>One-time setup: OSM OAuth application</h2>
-    <p>This page needs an OSM OAuth 2.0 <strong>public client</strong> (PKCE, no secret). Register it once on OpenStreetMap: open <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">openstreetmap.org</a>, go to My Settings → OAuth 2 Applications → Register new application, with:</p>
-    <ul>
-      <li>Redirect URI: <code id="redirectUri"></code> <button id="copyRedirectBtn" type="button" class="secondary">Copy</button></li>
-      <li>Permissions: only <code>Modify the map</code> (scope <code>write_api</code>)</li>
-      <li>Confidential application: <strong>no</strong> (this is a browser-only public client)</li>
-    </ul>
-    <p>A default client ID is built into this page. To use a different OAuth app, paste its client ID here (it is public, not a secret):</p>
-    <div class="row">
-      <input id="clientIdInput" type="text" placeholder="OSM OAuth client ID" autocomplete="off" spellcheck="false">
-      <button id="saveClientIdBtn" type="button">Save client ID</button>
-    </div>
-    <p class="small muted">A saved ID overrides the built-in default. Saved in this browser's localStorage, on this page's origin only. Links can also include it as <code>?client_id=…</code>, so you only ever type it once.</p>
-  </section>
-
-  <section id="prefillPanel" class="panel">
-    <h2>Prefilled change</h2>
-    <div id="prefillStatus" class="muted">No prefill in this link. Use the link format below, or load the demo.</div>
-    <div class="row" style="margin-top:8px">
-      <button id="demoBtn" type="button" class="secondary">Load demo (already-applied fix — preview only)</button>
-      <button id="rebaseBtn" type="button" class="secondary" hidden>Rebase on current versions</button>
-    </div>
-  </section>
 
   <section>
     <h2>Preview</h2>
@@ -124,6 +107,7 @@
     <textarea id="commentInput" rows="3" placeholder="Changeset comment…"></textarea>
     <div class="row" style="margin-top:10px">
       <button id="uploadBtn" type="button" disabled>Upload to OSM</button>
+      <button id="rebaseBtn" type="button" class="secondary" hidden>Rebase on current versions</button>
       <button id="oscBtn" type="button" class="secondary">Show osmChange XML</button>
       <button id="downloadOscBtn" type="button" class="secondary">Download .osc</button>
       <button id="closeCsBtn" type="button" class="secondary" hidden>Close open changeset</button>
@@ -136,10 +120,11 @@
     <div id="logBody"></div>
   </section>
 
-  <details>
-    <summary><strong>Link format</strong></summary>
-    <p>Primary format — one URL parameter <code>d</code> with base64url-encoded JSON (UTF-8). No geometry, no full member lists: only the operations. The page fetches current objects from the OSM API and applies them.</p>
-    <pre>{
+</main>
+<dialog id="helpDialog">
+  <h2 style="margin-top:0">Link format</h2>
+  <p>Primary format — one URL parameter <code>d</code> with base64url-encoded JSON (UTF-8). No geometry, no full member lists: only the operations. The page fetches current objects from the OSM API and applies them.</p>
+  <pre>{
   "comment": "Changeset comment",
   "changes": [
     {
@@ -150,18 +135,18 @@
     }
   ]
 }</pre>
-    <ul>
-      <li><code>version</code> is optional. If present and the live version differs, upload is blocked until you click Rebase (refetch + re-apply).</li>
-      <li><code>add</code> entries already present (same type + id + role) are skipped with a note; <code>remove</code> entries not present produce a warning. Neither is fatal.</li>
-      <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
-      <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
-      <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
-    </ul>
-    <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins. Add <code>client_id=…</code> to override the built-in default client ID (it is saved on first open).</p>
-  </details>
-</main>
+  <ul>
+    <li><code>version</code> is optional. If present and the live version differs, upload is blocked until you click Rebase (refetch + re-apply).</li>
+    <li><code>add</code> entries already present (same type + id + role) are skipped with a note; <code>remove</code> entries not present produce a warning. Neither is fatal.</li>
+    <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
+    <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
+    <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
+  </ul>
+  <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
+  <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
+</dialog>
 <footer>
-  <p class="small muted">Single static file, no backend, no third-party code. Tokens: localStorage on this origin only, refresh token kept alongside; Log out wipes both. Revoke anytime from OSM My Settings → Authorized applications. Opening this file via <code>file://</code> can preview diffs, but login needs the https hosted URL, because OSM must redirect back to a registered https address.</p>
+  <p class="small muted">OSMPR — <a href="https://github.com/Joald/osmpr">github.com/Joald/osmpr</a></p>
 </footer>
 <script>
 "use strict";
@@ -170,7 +155,6 @@ const API_BASE = "https://www.openstreetmap.org/api/0.6";
 const AUTH_URL = "https://www.openstreetmap.org/oauth2/authorize";
 const TOKEN_URL = "https://www.openstreetmap.org/oauth2/token";
 const LS_TOKENS = "osmpr.tokens";
-const LS_CLIENT = "osmpr.client_id";
 const DEFAULT_CLIENT_ID = "ODw9tcukLmoA-b3VvpOiWPno6Y_rOqNasViUw_L_tx0";
 const SS_VERIFIER = "osmpr.verifier";
 const SS_STATE = "osmpr.state";
@@ -336,14 +320,8 @@ if (typeof document !== "undefined") {
     if (cls) n.className = cls;
     return n;
   }
-  function getSavedClientId() {
-    try { return localStorage.getItem(LS_CLIENT) || ""; } catch (e) { return ""; }
-  }
   function getClientId() {
-    return getSavedClientId() || DEFAULT_CLIENT_ID;
-  }
-  function setClientId(v) {
-    try { localStorage.setItem(LS_CLIENT, v); } catch (e) { /* storage unavailable */ }
+    return DEFAULT_CLIENT_ID;
   }
   function getTokens() {
     try { return JSON.parse(localStorage.getItem(LS_TOKENS) || "null"); } catch (e) { return null; }
@@ -357,10 +335,8 @@ if (typeof document !== "undefined") {
   function refreshAuthBar() {
     const t = getTokens();
     const client = getClientId();
-    $("setupPanel").hidden = !!getSavedClientId();
     if (t && t.access_token) {
-      const exp = t.expires_at ? new Date(t.expires_at).toLocaleString() : "unknown expiry";
-      $("authStatus").textContent = "Logged in to OSM (token expires: " + exp + ").";
+      $("authStatus").textContent = t.expires_at ? "Logged in to OSM (token expires: " + new Date(t.expires_at).toLocaleString() + ")." : "Logged in to OSM.";
       $("loginBtn").disabled = true;
     } else {
       $("authStatus").textContent = client ? "Not logged in yet. Click Log in with OSM, then Upload." : "Set the OAuth client ID below first, then log in.";
@@ -600,41 +576,14 @@ if (typeof document !== "undefined") {
     await loadPreview();
     log("Rebased on current live versions.");
   }
-  function demoPayload() {
-    return {
-      comment: "Demo change: add relation 51805 as subarea of relation 175342 and remove it from relation 3073100 (already applied — preview only)",
-      changes: [
-        { type: "relation", id: 175342, version: 217, add: [{ type: "relation", id: 51805, role: "subarea" }], remove: [], tags: {} },
-        { type: "relation", id: 3073100, version: 11, add: [], remove: [{ type: "relation", id: 51805, role: "subarea" }], tags: {} },
-      ],
-    };
-  }
   async function init() {
-    $("redirectUri").textContent = location.origin + location.pathname;
-    const params = new URLSearchParams(location.search);
-    const cid = params.get("client_id");
-    if (cid) { setClientId(cid); log("OAuth client ID saved from link."); }
     try { await handleCallback(); } catch (e) { log("Login callback error: " + e.message, "note"); }
     refreshAuthBar();
-    $("clientIdInput").value = getClientId();
     $("loginBtn").addEventListener("click", login);
     $("logoutBtn").addEventListener("click", () => { clearTokens(); refreshAuthBar(); log("Logged out. Tokens wiped from this browser."); });
-    $("saveClientIdBtn").addEventListener("click", () => {
-      const v = $("clientIdInput").value.trim();
-      if (!v) return;
-      setClientId(v);
-      refreshAuthBar();
-      log("OAuth client ID saved.");
-    });
-    $("copyRedirectBtn").addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(location.origin + location.pathname); log("Redirect URI copied."); }
-      catch (e) { log("Copy failed — select the URI text manually.", "note"); }
-    });
-    $("demoBtn").addEventListener("click", () => {
-      prefill = demoPayload();
-      $("prefillStatus").textContent = "Demo loaded: a two-relation member fix that is already live, so the preview should show only already-applied notes and Upload stays disabled.";
-      loadPreview();
-    });
+    $("helpBtn").addEventListener("click", () => $("helpDialog").showModal());
+    $("helpCloseBtn").addEventListener("click", () => $("helpDialog").close());
+    $("helpDialog").addEventListener("click", (e) => { if (e.target === $("helpDialog")) $("helpDialog").close(); });
     $("rebaseBtn").addEventListener("click", rebase);
     $("uploadBtn").addEventListener("click", upload);
     $("oscBtn").addEventListener("click", () => {
@@ -661,13 +610,10 @@ if (typeof document !== "undefined") {
     try {
       prefill = parsePrefill(location.search);
       if (prefill) {
-        $("prefillStatus").textContent = "Prefill loaded: " + prefill.changes.length + " object(s), " + prefill.changes.reduce((n, c) => n + c.add.length + c.remove.length, 0) + " member operation(s).";
+        log("Prefill loaded: " + prefill.changes.length + " object(s), " + prefill.changes.reduce((n, c) => n + c.add.length + c.remove.length, 0) + " member operation(s).");
         loadPreview();
-      } else {
-        $("prefillStatus").textContent = "No prefill in this link. Open a prefill link, or load the demo below to see the preview.";
       }
     } catch (e) {
-      $("prefillStatus").textContent = "Prefill error: " + e.message;
       log("Prefill error: " + e.message, "note");
     }
   }

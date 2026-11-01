@@ -19,26 +19,6 @@ shareable link: open the link, review the diff, click Upload.
 After the first login, a typical edit is two clicks: open the link,
 click Upload.
 
-## One-time setup: OSM OAuth application
-
-The page talks to the OSM API directly from your browser, so it needs
-an OAuth 2.0 **public client** (PKCE, no client secret). A default
-client ID is built into the page, so most users need no setup at all.
-To use your own OAuth app instead, register it once:
-
-1. Open https://www.openstreetmap.org/ and go to
-   My Settings → OAuth 2 Applications → Register new application.
-2. Redirect URI: `https://joald.github.io/osmpr/`
-   (the page also shows its own URL in the setup panel, with a Copy
-   button).
-3. Permissions: only **Modify the map** (scope `write_api`).
-4. Confidential application: **no** — this is a browser-only public
-   client.
-5. Paste the client ID it gives you into the page (it is public, not
-   a secret). It overrides the built-in default, is saved in your
-   browser's localStorage, and links can also include it as
-   `?client_id=…`, so you only type it once.
-
 ## Token storage
 
 - Access token + refresh token live in `localStorage` on the page's
@@ -114,9 +94,6 @@ present, `d` wins.
 - If an upload fails midway, the open changeset ID stays visible with
   a **Close open changeset** button, so nothing is left dangling
   silently.
-- The page also has a **Load demo** button: an already-applied
-  two-relation fix, so the preview shows only already-applied notes
-  and Upload stays disabled. Safe to click, nothing uploads.
 
 ## Development
 
