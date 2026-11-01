@@ -155,7 +155,7 @@
     <li><code>add</code> entries already present (same type + id + role) are skipped with a note; <code>remove</code> entries not present produce a warning. Neither is fatal.</li>
     <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
     <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
-    <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry.</li>
+    <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry; Diff shows them in a Geometry section.</li>
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
@@ -334,9 +334,10 @@ function diffChars(a, b) {
   while (j < m) { push("ins", b[j]); j++; }
   return ops;
 }
-function buildDiffLines(oldTags, oldMembers, newTags, newMembers) {
+function buildDiffLines(oldTags, oldMembers, newTags, newMembers, oldGeom, newGeom) {
   // GitHub-style unified diff lines. Tag line: {kind, oldNo, newNo, key, value?/ops?/side?}.
   // Member line: {kind, oldNo, newNo, member}. Changed tags become a -/+ line pair.
+  // Geometry line: node position ({pos: [lat, lon]}) or way node ref ({ref}).
   const tagLines = [];
   const oldKeys = Object.keys(oldTags).sort(), newKeys = Object.keys(newTags).sort();
   const oldIdx = new Map(oldKeys.map((k, i) => [k, i + 1]));
@@ -363,7 +364,34 @@ function buildDiffLines(oldTags, oldMembers, newTags, newMembers) {
     const k = memberKey(m);
     if (!newMIdx.has(k)) memberLines.push({ kind: "del", oldNo: oldMIdx.get(k), newNo: "", member: m });
   }
-  return { tagLines, memberLines };
+  const geometryLines = [];
+  const gType = (oldGeom && oldGeom.type) || (newGeom && newGeom.type);
+  if (gType === "node") {
+    const oOk = oldGeom && oldGeom.lat != null && oldGeom.lon != null;
+    const nOk = newGeom && newGeom.lat != null && newGeom.lon != null;
+    if (oOk && nOk) {
+      if (oldGeom.lat !== newGeom.lat || oldGeom.lon !== newGeom.lon) {
+        geometryLines.push({ kind: "del", oldNo: 1, newNo: "", pos: [oldGeom.lat, oldGeom.lon] });
+        geometryLines.push({ kind: "add", oldNo: "", newNo: 1, pos: [newGeom.lat, newGeom.lon] });
+      } else geometryLines.push({ kind: "same", oldNo: 1, newNo: 1, pos: [newGeom.lat, newGeom.lon] });
+    } else if (oOk) geometryLines.push({ kind: "del", oldNo: 1, newNo: "", pos: [oldGeom.lat, oldGeom.lon] });
+    else if (nOk) geometryLines.push({ kind: "add", oldNo: "", newNo: 1, pos: [newGeom.lat, newGeom.lon] });
+  } else if (gType === "way") {
+    const oldRefs = (oldGeom && oldGeom.nodeRefs) || [];
+    const newRefs = (newGeom && newGeom.nodeRefs) || [];
+    // Occurrence-aware matching: closed ways repeat the first node, so match
+    // each new ref to the earliest still-unused old position of the same id.
+    const oldQueues = new Map();
+    oldRefs.forEach((r, i) => { if (!oldQueues.has(r)) oldQueues.set(r, []); oldQueues.get(r).push(i + 1); });
+    const used = new Set();
+    for (const r of newRefs) {
+      const q = oldQueues.get(r);
+      if (q && q.length) { const oldNo = q.shift(); used.add(oldNo); geometryLines.push({ kind: "same", oldNo, newNo: geometryLines.length + 1, ref: r }); }
+      else geometryLines.push({ kind: "add", oldNo: "", newNo: geometryLines.length + 1, ref: r });
+    }
+    oldRefs.forEach((r, i) => { if (!used.has(i + 1)) geometryLines.push({ kind: "del", oldNo: i + 1, newNo: "", ref: r }); });
+  }
+  return { tagLines, memberLines, geometryLines };
 }
 function buildObjectXml(type, id, version, changesetId, state, lat, lon) {
   let s = "<" + type + " id=\"" + id + "\" version=\"" + version + "\" changeset=\"" + changesetId + "\"";
@@ -445,6 +473,54 @@ if (typeof document !== "undefined") {
     }
     return li;
   }
+  function geometryPreview(oldObj, newObj) {
+    // Preview summary for geometry changes (relations are covered by Members).
+    if (!oldObj || !newObj || oldObj.type !== newObj.type) return null;
+    if (oldObj.type === "node") {
+      const oOk = oldObj.lat != null && oldObj.lon != null, nOk = newObj.lat != null && newObj.lon != null;
+      const ul = el("ul", null, "diff");
+      if (oOk && nOk && (oldObj.lat !== newObj.lat || oldObj.lon !== newObj.lon)) {
+        const li = document.createElement("li");
+        li.appendChild(document.createTextNode("Position: " + oldObj.lat + ", " + oldObj.lon + " -> "));
+        const s = document.createElement("span"); s.className = "add"; s.textContent = newObj.lat + ", " + newObj.lon;
+        li.appendChild(s);
+        ul.appendChild(li);
+        return section("Geometry changed:", [ul]);
+      }
+      if (oOk && !nOk) {
+        const li = document.createElement("li");
+        li.appendChild(document.createTextNode("Position: "));
+        const s = document.createElement("span"); s.className = "del"; s.style.textDecoration = "line-through"; s.textContent = oldObj.lat + ", " + oldObj.lon;
+        li.appendChild(s);
+        li.appendChild(document.createTextNode(" (deleted)"));
+        ul.appendChild(li);
+        return section("Geometry changed:", [ul]);
+      }
+      if (!oOk && nOk) {
+        const li = document.createElement("li");
+        li.appendChild(document.createTextNode("Position: (new) "));
+        const s = document.createElement("span"); s.className = "add"; s.textContent = newObj.lat + ", " + newObj.lon;
+        li.appendChild(s);
+        ul.appendChild(li);
+        return section("Geometry changed:", [ul]);
+      }
+      return null;
+    }
+    if (oldObj.type === "way") {
+      const o = oldObj.nodeRefs || [], n = newObj.nodeRefs || [];
+      if (JSON.stringify(o) !== JSON.stringify(n)) {
+        const li = document.createElement("li");
+        li.appendChild(document.createTextNode("Nodes: " + o.length + " -> "));
+        const s = document.createElement("span"); s.className = "add"; s.textContent = n.length;
+        li.appendChild(s);
+        const ul = el("ul", null, "diff");
+        ul.appendChild(li);
+        return section("Geometry changed:", [ul]);
+      }
+      return null;
+    }
+    return null;
+  }
   function memberLi(prefix, m, cls) {
     const li = el("li", null, cls);
     li.appendChild(document.createTextNode(prefix ? prefix + " " : ""));
@@ -470,12 +546,12 @@ if (typeof document !== "undefined") {
     }
     return frag;
   }
-  function buildDiffPanel(oldTags, oldMembers, newTags, newMembers, isRelation) {
+  function buildDiffPanel(oldTags, oldMembers, newTags, newMembers, isRelation, oldGeom, newGeom) {
     // GitHub-style unified diff: line numbers, whole changed lines tinted,
     // unchanged runs collapsed by default behind an expander.
     const div = document.createElement("div");
     div.hidden = true;
-    const { tagLines, memberLines } = buildDiffLines(oldTags, oldMembers, newTags, newMembers);
+    const { tagLines, memberLines, geometryLines } = buildDiffLines(oldTags, oldMembers, newTags, newMembers, oldGeom, newGeom);
     const lineRow = (ln, contentFn) => {
       const tr = document.createElement("tr");
       if (ln.kind === "add") tr.className = "diff-add";
@@ -540,8 +616,17 @@ if (typeof document !== "undefined") {
       td.appendChild(osmLink(ln.member.type, ln.member.ref));
       td.appendChild(document.createTextNode(" (" + (ln.member.role || "no role") + ")"));
     };
+    const geomContent = (ln, td) => {
+      td.appendChild(document.createTextNode(ln.kind === "add" ? "+ " : ln.kind === "del" ? "- " : "  "));
+      if (ln.pos) td.appendChild(document.createTextNode("Position: " + ln.pos[0] + ", " + ln.pos[1]));
+      else {
+        td.appendChild(document.createTextNode("node "));
+        td.appendChild(osmLink("node", ln.ref));
+      }
+    };
     if (tagLines.length) div.appendChild(section("Tags:", [renderLines(tagLines, tagContent)]));
     if (isRelation && memberLines.length) div.appendChild(section("Members:", [renderLines(memberLines, memberContent)]));
+    if (geometryLines.length) div.appendChild(section("Geometry:", [renderLines(geometryLines, geomContent)]));
     if (!div.hasChildNodes()) div.appendChild(el("p", "Empty object", "muted"));
     return div;
   }
@@ -965,6 +1050,7 @@ if (typeof document !== "undefined") {
       card.appendChild(el("p", "⚠ Version conflict: prefill expected v" + c.version + ", live is v" + item.current.version + ". Rebase before uploading.", "note"));
     }
     const cur = item.current, comp = item.computed;
+    const newObj = { type: c.type, id: c.id, tags: comp.tags, members: comp.members, lat: comp.lat, lon: comp.lon, nodeRefs: comp.nodeRefs };
     const previewView = document.createElement("div");
     if (c.type === "relation") {
       const d = diffMembers(cur.members, comp.members);
@@ -993,11 +1079,13 @@ if (typeof document !== "undefined") {
       }
       previewView.appendChild(section("Tags changed:", [ul]));
     }
+    const gp = geometryPreview(cur, newObj);
+    if (gp) previewView.appendChild(gp);
     if (!comp.changed && !item.conflict) previewView.appendChild(el("p", "The proposed changes will not modify this object.", "muted"));
     for (const n of comp.notes) previewView.appendChild(el("p", (n.kind === "warn" ? "⚠ " : "• ") + n.text, n.kind === "warn" ? "note" : "muted"));
-    const diffView = buildDiffPanel(cur.tags, cur.members, comp.tags, comp.members, c.type === "relation");
+    const diffView = buildDiffPanel(cur.tags, cur.members, comp.tags, comp.members, c.type === "relation", cur, newObj);
     const rawView = buildRawPanel(c);
-    const mapView = buildMapView(cur, { type: c.type, id: c.id, tags: comp.tags, members: comp.members, lat: comp.lat, lon: comp.lon, nodeRefs: comp.nodeRefs });
+    const mapView = buildMapView(cur, newObj);
     wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView, map: mapView });
     card.appendChild(previewView);
     card.appendChild(diffView);
@@ -1131,14 +1219,17 @@ if (typeof document !== "undefined") {
       }
       previewView.appendChild(section("Tags changed:", [ul]));
     }
-    const md = obj.type === "relation" ? diffMembers(oldMembers, newMembers) : null;
-    if (!td.length && (!md || (!md.added.length && !md.removed.length))) previewView.appendChild(el("p", "No differences", "muted"));
-    const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation");
     const emptyObj = { type: obj.type, id: obj.id, tags: {}, members: [], nodeRefs: null, lat: null, lon: null };
     let mapOld = oldObj, mapNew = newObj;
     if (action === "create") mapOld = emptyObj;
     if (action === "delete") mapNew = emptyObj;
     if (oldUnavailable || (action === "modify" && !oldObj)) mapOld = mapNew;
+    const gp = geometryPreview(mapOld || emptyObj, mapNew || emptyObj);
+    if (gp) previewView.appendChild(gp);
+    const md = obj.type === "relation" ? diffMembers(oldMembers, newMembers) : null;
+    const geomChanged = action === "create" || action === "delete" || (oldObj && newObj && (obj.type === "node" ? (oldObj.lat !== newObj.lat || oldObj.lon !== newObj.lon) : obj.type === "way" ? JSON.stringify(oldObj.nodeRefs || null) !== JSON.stringify(newObj.nodeRefs || null) : false));
+    if (!td.length && (!md || (!md.added.length && !md.removed.length)) && !geomChanged) previewView.appendChild(el("p", "No differences", "muted"));
+    const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation", mapOld || emptyObj, mapNew || emptyObj);
     const mapView = buildMapView(mapOld || emptyObj, mapNew || emptyObj);
     wireSwitch(btns, { preview: previewView, diff: diffView, map: mapView });
     card.appendChild(previewView);

@@ -178,4 +178,23 @@ assert.equal(ml.memberLines[0].kind, "same"); assert.equal(ml.memberLines[0].old
 assert.equal(ml.memberLines[1].kind, "add"); assert.equal(ml.memberLines[1].newNo, 2);
 assert.equal(ml.memberLines[2].kind, "del"); assert.equal(ml.memberLines[2].oldNo, 2);
 
+// --- diff geometry lines ---
+const nodeDl = buildDiffLines({}, [], {}, [], { type: "node", lat: 51.5, lon: -0.1 }, { type: "node", lat: 51.6, lon: -0.05 });
+assert.equal(nodeDl.geometryLines.length, 2);
+assert.equal(nodeDl.geometryLines[0].kind, "del"); assert.deepEqual(nodeDl.geometryLines[0].pos, [51.5, -0.1]);
+assert.equal(nodeDl.geometryLines[1].kind, "add"); assert.deepEqual(nodeDl.geometryLines[1].pos, [51.6, -0.05]);
+const nodeSameDl = buildDiffLines({}, [], {}, [], { type: "node", lat: 51.5, lon: -0.1 }, { type: "node", lat: 51.5, lon: -0.1 });
+assert.equal(nodeSameDl.geometryLines.length, 1); assert.equal(nodeSameDl.geometryLines[0].kind, "same");
+const nodeCreatedDl = buildDiffLines({}, [], {}, [], null, { type: "node", lat: 51.5, lon: -0.1 });
+assert.equal(nodeCreatedDl.geometryLines.length, 1); assert.equal(nodeCreatedDl.geometryLines[0].kind, "add");
+const wayDl = buildDiffLines({}, [], {}, [], { type: "way", nodeRefs: [11, 22, 33, 11] }, { type: "way", nodeRefs: [11, 44, 33, 11] });
+assert.equal(wayDl.geometryLines.length, 5);
+assert.equal(wayDl.geometryLines[0].kind, "same"); assert.equal(wayDl.geometryLines[0].oldNo, 1); assert.equal(wayDl.geometryLines[0].newNo, 1);
+assert.equal(wayDl.geometryLines[1].kind, "add"); assert.equal(wayDl.geometryLines[1].ref, 44); assert.equal(wayDl.geometryLines[1].newNo, 2);
+assert.equal(wayDl.geometryLines[2].kind, "same"); assert.equal(wayDl.geometryLines[2].oldNo, 3); assert.equal(wayDl.geometryLines[2].newNo, 3);
+assert.equal(wayDl.geometryLines[3].kind, "same"); assert.equal(wayDl.geometryLines[3].oldNo, 4); assert.equal(wayDl.geometryLines[3].newNo, 4);
+assert.equal(wayDl.geometryLines[4].kind, "del"); assert.equal(wayDl.geometryLines[4].ref, 22); assert.equal(wayDl.geometryLines[4].oldNo, 2);
+const relDl = buildDiffLines({}, [], {}, [], { type: "relation" }, { type: "relation" });
+assert.equal(relDl.geometryLines.length, 0, "relations carry geometry in members, not a Geometry section");
+
 console.log("All editor logic tests passed.");

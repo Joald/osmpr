@@ -102,7 +102,9 @@ present, `d` wins.
   unchanged members are omitted. Each object card has a
   Preview / Diff / Map switch (prefill cards also have Raw): Diff is a
   GitHub-style unified diff with line numbers, whole changed lines
-  tinted, and unchanged lines collapsed by default. Map draws the
+  tinted, and unchanged lines collapsed by default; geometry changes
+  show in a Geometry section (node positions, way node lists), and
+  Preview summarizes them as Geometry changed. Map draws the
   object on OpenStreetMap tiles (Leaflet, loaded from CDN on first
   use) and highlights old vs new geometry. Sections (Tags, Members)
   have a separator and a chevron to collapse them.
