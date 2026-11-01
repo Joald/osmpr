@@ -3,7 +3,7 @@
 OSMPR stands for OpenStreetMap Pull Request.
 
 A single-file, zero-dependency, zero-backend editor for OpenStreetMap
-relation member edits (and tag edits). It turns an edit into a
+relation member edits, tag edits, and geometry edits. It turns an edit into a
 shareable link: open the link, review the diff, click Upload.
 
 ## How it works
@@ -13,15 +13,15 @@ shareable link: open the link, review the diff, click Upload.
 2. You open it. The page fetches the current objects from the OSM API
    (public read), applies the encoded operations, and shows a diff
    preview: added members, removed members, tag changes. Each object
-   card has **Diff** (character-level) and **Raw** (change JSON)
-   panels, collapsed by default.
+   card has a Preview / Diff / Raw / Map switch: Diff shows the whole
+   object with a character-level diff, Raw shows the change JSON, Map
+   draws the object and highlights geometry changes.
 3. You click **Upload**. The page creates one changeset, uploads every
    changed object, and closes the changeset. A toast confirms the
    upload, and the page switches to the new changeset's view.
 
 An existing changeset can be viewed the same way: open
-`?changeset=<id>`, or paste an id or changeset URL in the Changeset
-panel.
+`?changeset=<id>`, or paste an id or changeset URL in the page header.
 
 After the first login, a typical edit is two clicks: open the link,
 click Upload.
@@ -48,8 +48,8 @@ click Upload.
 ## Link format
 
 Primary format — one URL parameter `d` with base64url-encoded JSON
-(UTF-8). No geometry, no full member lists: only the operations. The
-page fetches the current objects from the OSM API and applies them.
+(UTF-8). No full geometry, no full member lists: only the operations.
+The page fetches the current objects from the OSM API and applies them.
 
 ```json
 {
@@ -76,6 +76,9 @@ Rules:
   `tags` value `null` deletes the tag.
 - Member operations only apply to relations. Tag operations apply to
   nodes, ways, and relations.
+- Geometry: a node change may set `lat` and `lon` (both, decimal
+  degrees); a way change may set `nodes` (array of node ids). Invalid
+  geometry is ignored with a warning.
 - Upload is disabled when every computed object is unchanged, so
   re-opening an already-applied link cannot re-upload it.
 
@@ -93,9 +96,11 @@ present, `d` wins.
 
 - Preview shows added members (green) and removed members (red);
   unchanged members are omitted. Each object card has a
-  Preview / Diff / Raw switch: Diff shows the whole object with a
-  character-level diff, Raw shows the change JSON. Sections
-  (Tags, Members) have a separator and a chevron to collapse them.
+  Preview / Diff / Raw / Map switch: Diff shows the whole object with a
+  character-level diff, Raw shows the change JSON, Map draws the object
+  (hand-rolled SVG, no third-party scripts) and highlights old vs new
+  geometry. Sections (Tags, Members) have a separator and a chevron to
+  collapse them.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before

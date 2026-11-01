@@ -148,6 +148,7 @@
     <li><code>add</code> entries already present (same type + id + role) are skipped with a note; <code>remove</code> entries not present produce a warning. Neither is fatal.</li>
     <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
     <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
+    <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry.</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
   </ul>
@@ -213,6 +214,7 @@ function parsePrefill(search) {
         add: (c.add || []).map((m) => ({ type: normType(m.type), ref: m.id, role: m.role || "" })),
         remove: (c.remove || []).map((m) => ({ type: normType(m.type), ref: m.id, role: m.role || "", roleGiven: m.role !== undefined && m.role !== null })),
         tags: c.tags || {},
+        lat: c.lat ?? null, lon: c.lon ?? null, nodes: c.nodes ?? null,
       };
     });
     return { comment: obj.comment || "", changes };
@@ -230,7 +232,7 @@ function parsePrefill(search) {
       return { type: m.type, ref: m.ref, role: m.role, roleGiven };
     }).filter(Boolean);
     const v = params.get("v");
-    return { comment: params.get("comment") || "", changes: [{ type: "relation", id, version: v ? parseInt(v, 10) : null, add, remove, tags: {} }] };
+    return { comment: params.get("comment") || "", changes: [{ type: "relation", id, version: v ? parseInt(v, 10) : null, add, remove, tags: {}, lat: null, lon: null, nodes: null }] };
   }
   return null;
 }
@@ -263,9 +265,25 @@ function applyOps(current, ops) {
       tags[k] = v;
     }
   }
+  // Geometry: node moves (lat + lon together) and way node-list changes.
+  // Computed state always carries geometry, defaulting to current — so way
+  // uploads keep their node refs instead of writing an empty list.
+  let lat = current.lat, lon = current.lon, nodeRefs = current.nodeRefs || null;
+  if (ops.lat != null || ops.lon != null) {
+    if (current.type !== "node") notes.push({ kind: "warn", text: "lat/lon only apply to nodes, ignored for " + current.type + " " + current.id });
+    else if (!Number.isFinite(ops.lat) || !Number.isFinite(ops.lon) || ops.lat < -90 || ops.lat > 90 || ops.lon < -180 || ops.lon > 180) notes.push({ kind: "warn", text: "Invalid node position ignored (need lat -90..90, lon -180..180)" });
+    else { lat = ops.lat; lon = ops.lon; }
+  }
+  if (ops.nodes != null) {
+    if (current.type !== "way") notes.push({ kind: "warn", text: "nodes only apply to ways, ignored for " + current.type + " " + current.id });
+    else if (!Array.isArray(ops.nodes) || !ops.nodes.every((n) => Number.isInteger(n))) notes.push({ kind: "warn", text: "Invalid way node list ignored (need integer node ids)" });
+    else nodeRefs = ops.nodes.slice();
+  }
   const changed = JSON.stringify(members) !== JSON.stringify(current.members.map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" })))
-    || JSON.stringify(tags) !== JSON.stringify(current.tags);
-  return { members, tags, notes, changed };
+    || JSON.stringify(tags) !== JSON.stringify(current.tags)
+    || lat !== current.lat || lon !== current.lon
+    || JSON.stringify(nodeRefs) !== JSON.stringify(current.nodeRefs || null);
+  return { members, tags, notes, changed, lat, lon, nodeRefs };
 }
 function diffMembers(oldMembers, newMembers) {
   const oldKeys = new Set(oldMembers.map(memberKey));
@@ -332,6 +350,24 @@ function buildOsmChange(changesetId, items) {
   return s;
 }
 
+/* Map geometry math (pure, tested under node) */
+function projectCoord(lat, lon, lat0, lon0) {
+  // Equirectangular projection around (lat0, lon0); y grows southward.
+  const kx = Math.cos(lat0 * Math.PI / 180);
+  return { x: (lon - lon0) * kx, y: (lat0 - lat) };
+}
+function fitMapBounds(pts) {
+  // pts: [{x, y}] in projected units. Returns padded {minX, minY, w, h}, or null when empty.
+  if (!pts.length) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts) { if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y; if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y; }
+  let w = maxX - minX, h = maxY - minY;
+  if (w === 0 && h === 0) { w = 0.004; h = 0.004; } // single point: ~400 m window
+  else if (w === 0) w = h * 0.1 || 0.004;
+  else if (h === 0) h = w * 0.1 || 0.004;
+  const pad = 0.08;
+  return { minX: minX - w * pad, minY: minY - h * pad, w: w * (1 + 2 * pad), h: h * (1 + 2 * pad) };
+}
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -469,11 +505,144 @@ if (typeof document !== "undefined") {
     div.appendChild(pre);
     return div;
   }
+  // ---- Map view: hand-rolled SVG, no third-party scripts ----
+  const MAP_COLORS = { unchanged: "#8a8f98", added: "#7ee787", removed: "#ff7b72", old: "#ff7b72", new: "#7ee787", connector: "#8a8f98" };
+  async function fetchNodeCoords(ids) {
+    const out = new Map();
+    const uniq = [...new Set((ids || []).filter(Number.isInteger))];
+    for (let i = 0; i < uniq.length; i += 100) {
+      const chunk = uniq.slice(i, i + 100);
+      const res = await fetch(API_BASE + "/nodes.json?nodes=" + chunk.join(","));
+      if (!res.ok) throw new Error("Node fetch failed (" + res.status + ")");
+      const data = await res.json();
+      for (const e of data.elements || []) if (e.type === "node") out.set(e.id, { lat: e.lat, lon: e.lon });
+    }
+    return out;
+  }
+  async function fetchObjectFull(type, id) {
+    const res = await fetch(API_BASE + "/" + type + "/" + id + "/full.json");
+    if (!res.ok) throw new Error("Full fetch failed (" + res.status + ") for " + type + " " + id);
+    const data = await res.json();
+    const nodeCoords = new Map(), wayNodes = new Map();
+    let members = [];
+    for (const e of data.elements || []) {
+      if (e.type === "node") nodeCoords.set(e.id, { lat: e.lat, lon: e.lon });
+      else if (e.type === "way") wayNodes.set(e.id, e.nodes || []);
+      else if (e.type === type && e.id === id && e.members) members = e.members.map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" }));
+    }
+    return { members, wayNodes, nodeCoords };
+  }
+  function svgEl(tag, attrs) {
+    const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    return n;
+  }
+  async function renderMapSvg(oldObj, newObj) {
+    // Drawables: {kind, pts: [{lat, lon}]}. kind: unchanged | added | removed | old | new | connector.
+    const drawables = [];
+    const type = oldObj.type;
+    if (type === "node") {
+      const oOk = oldObj.lat != null && oldObj.lon != null, nOk = newObj.lat != null && newObj.lon != null;
+      if (!oOk && !nOk) return null;
+      if (oOk && nOk && (oldObj.lat !== newObj.lat || oldObj.lon !== newObj.lon)) {
+        const o = { lat: oldObj.lat, lon: oldObj.lon }, n = { lat: newObj.lat, lon: newObj.lon };
+        drawables.push({ kind: "old", pts: [o] });
+        drawables.push({ kind: "connector", pts: [o, n] });
+        drawables.push({ kind: "new", pts: [n] });
+      } else if (oOk && !nOk) drawables.push({ kind: "removed", pts: [{ lat: oldObj.lat, lon: oldObj.lon }] });
+      else if (!oOk && nOk) drawables.push({ kind: "added", pts: [{ lat: newObj.lat, lon: newObj.lon }] });
+      else drawables.push({ kind: "unchanged", pts: [{ lat: oldObj.lat, lon: oldObj.lon }] });
+    } else if (type === "way") {
+      const coords = await fetchNodeCoords([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
+      const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(Boolean);
+      const oPts = line(oldObj.nodeRefs), nPts = line(newObj.nodeRefs);
+      const changed = JSON.stringify(oldObj.nodeRefs) !== JSON.stringify(newObj.nodeRefs);
+      if (changed) {
+        if (oPts.length >= 2) drawables.push({ kind: "old", pts: oPts });
+        if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts });
+      } else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
+    } else if (type === "relation") {
+      const full = await fetchObjectFull("relation", oldObj.id);
+      const wayGeom = new Map();
+      for (const [wid, refs] of full.wayNodes) {
+        const pts = refs.map((r) => full.nodeCoords.get(r)).filter(Boolean);
+        if (pts.length >= 2) wayGeom.set(wid, pts);
+      }
+      // Member ways missing from the current full (added, or removed from
+      // current in changeset view): fetch individually, capped.
+      const missing = [];
+      for (const m of [...(oldObj.members || []), ...(newObj.members || [])]) {
+        if (m.type === "way" && !wayGeom.has(m.ref) && !missing.includes(m.ref)) missing.push(m.ref);
+      }
+      for (const wid of missing.slice(0, 100)) {
+        try {
+          const wfull = await fetchObjectFull("way", wid);
+          const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(Boolean);
+          if (pts.length >= 2) wayGeom.set(wid, pts);
+        } catch (e) { /* skip unfetchable way */ }
+      }
+      const oldKeys = new Set((oldObj.members || []).map(memberKey));
+      const newKeys = new Set((newObj.members || []).map(memberKey));
+      const pushMember = (m, kind) => {
+        if (m.type !== "way") return;
+        const pts = wayGeom.get(m.ref);
+        if (pts) drawables.push({ kind, pts });
+      };
+      for (const m of newObj.members || []) if (oldKeys.has(memberKey(m))) pushMember(m, "unchanged");
+      for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m))) pushMember(m, "removed");
+      for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m))) pushMember(m, "added");
+    }
+    if (!drawables.length) return null;
+    const allPts = drawables.flatMap((d) => d.pts);
+    const lat0 = allPts.reduce((s, p) => s + p.lat, 0) / allPts.length;
+    const lon0 = allPts.reduce((s, p) => s + p.lon, 0) / allPts.length;
+    const proj = drawables.map((d) => ({ kind: d.kind, xy: d.pts.map((p) => projectCoord(p.lat, p.lon, lat0, lon0)) }));
+    const bounds = fitMapBounds(proj.flatMap((d) => d.xy));
+    const svg = svgEl("svg", { viewBox: bounds.minX + " " + bounds.minY + " " + bounds.w + " " + bounds.h, style: "width:100%;height:auto;display:block;aspect-ratio:" + Math.max(0.5, Math.min(2.5, bounds.w / bounds.h)) });
+    const sw = bounds.w * 0.004, r = bounds.w * 0.008;
+    for (const d of proj) {
+      const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
+      const ptsAttr = d.xy.map((p) => p.x + "," + p.y).join(" ");
+      if (d.xy.length === 1) {
+        svg.appendChild(svgEl("circle", { cx: d.xy[0].x, cy: d.xy[0].y, r, fill: color }));
+      } else if (d.kind === "connector") {
+        svg.appendChild(svgEl("line", { x1: d.xy[0].x, y1: d.xy[0].y, x2: d.xy[1].x, y2: d.xy[1].y, stroke: color, "stroke-width": sw, "stroke-dasharray": (bounds.w * 0.02) + " " + (bounds.w * 0.012) }));
+      } else {
+        const first = d.xy[0], last = d.xy[d.xy.length - 1];
+        const closed = first.x === last.x && first.y === last.y;
+        if (closed) svg.appendChild(svgEl("polygon", { points: ptsAttr, fill: color, "fill-opacity": 0.15, stroke: color, "stroke-width": sw, "stroke-linejoin": "round" }));
+        else svg.appendChild(svgEl("polyline", { points: ptsAttr, fill: "none", stroke: color, "stroke-width": sw, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      }
+    }
+    return svg;
+  }
+  function buildMapView(oldObj, newObj) {
+    const div = document.createElement("div");
+    div.hidden = true;
+    div.appendChild(el("p", "Loading map…", "muted"));
+    let loaded = false;
+    div.load = async () => {
+      if (loaded) return;
+      loaded = true;
+      try {
+        const svg = await renderMapSvg(oldObj, newObj);
+        div.innerHTML = "";
+        if (svg) {
+          div.appendChild(svg);
+          div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
+        } else div.appendChild(el("p", "No drawable geometry for this object.", "muted"));
+      } catch (e) {
+        div.innerHTML = "";
+        div.appendChild(el("p", "Map failed to load: " + e.message, "del"));
+      }
+    };
+    return div;
+  }
   function makeSwitch() {
-    // Segmented Preview / Diff / Raw control; caller wires the views.
+    // Segmented Preview / Diff / Raw / Map control; caller wires the views.
     const wrap = el("div", null, "switch");
     const btns = {};
-    for (const name of ["Preview", "Diff", "Raw"]) {
+    for (const name of ["Preview", "Diff", "Raw", "Map"]) {
       const b = el("button", name, name === "Preview" ? "" : "secondary");
       b.type = "button";
       wrap.appendChild(b);
@@ -483,14 +652,16 @@ if (typeof document !== "undefined") {
   }
   function wireSwitch(btns, views) {
     const show = (which) => {
-      for (const k of ["preview", "diff", "raw"]) {
+      for (const k of ["preview", "diff", "raw", "map"]) {
         views[k].hidden = (k !== which);
         btns[k].classList.toggle("secondary", k !== which);
       }
+      if (views[which].load) views[which].load();
     };
     btns.preview.addEventListener("click", () => show("preview"));
     btns.diff.addEventListener("click", () => show("diff"));
     btns.raw.addEventListener("click", () => show("raw"));
+    btns.map.addEventListener("click", () => show("map"));
   }
   function section(title, children) {
     // Collapsible section: separator above, chevron toggle on the right.
@@ -770,16 +941,18 @@ if (typeof document !== "undefined") {
     for (const n of comp.notes) previewView.appendChild(el("p", (n.kind === "warn" ? "⚠ " : "• ") + n.text, n.kind === "warn" ? "note" : "muted"));
     const diffView = buildDiffPanel(cur.tags, cur.members, comp.tags, comp.members, c.type === "relation");
     const rawView = buildRawPanel(c);
-    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView });
+    const mapView = buildMapView(cur, { type: c.type, id: c.id, tags: comp.tags, members: comp.members, lat: comp.lat, lon: comp.lon, nodeRefs: comp.nodeRefs });
+    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView, map: mapView });
     card.appendChild(previewView);
     card.appendChild(diffView);
     card.appendChild(rawView);
+    card.appendChild(mapView);
   }
   function changedItems() {
     return items.filter((it) => it.current && it.computed && it.computed.changed && !it.conflict && !it.error);
   }
   function currentOscItems() {
-    return changedItems().map((it) => ({ type: it.change.type, id: it.change.id, version: it.current.version, state: it.computed, lat: it.current.lat, lon: it.current.lon }));
+    return changedItems().map((it) => ({ type: it.change.type, id: it.change.id, version: it.current.version, state: it.computed, lat: it.computed.lat, lon: it.computed.lon }));
   }
   async function upload() {
     const token = await getValidToken();
@@ -796,7 +969,7 @@ if (typeof document !== "undefined") {
       openChangesetId = (await res.text()).trim();
       log("Changeset " + openChangesetId + " created. Uploading " + toUpload.length + " object(s)…");
       for (const it of toUpload) {
-        const xml = "<osm>" + buildObjectXml(it.change.type, it.change.id, it.current.version, openChangesetId, it.computed, it.current.lat, it.current.lon) + "</osm>";
+        const xml = "<osm>" + buildObjectXml(it.change.type, it.change.id, it.current.version, openChangesetId, it.computed, it.computed.lat, it.computed.lon) + "</osm>";
         res = await fetch(API_BASE + "/" + it.change.type + "/" + it.change.id, { method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: xml });
         if (!res.ok) throw new Error("Upload failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
         const newVer = (await res.text()).trim();
@@ -906,10 +1079,17 @@ if (typeof document !== "undefined") {
     if (!td.length && (!md || (!md.added.length && !md.removed.length))) previewView.appendChild(el("p", "No differences", "muted"));
     const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation");
     const rawView = buildRawPanel(newObj || oldObj);
-    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView });
+    const emptyObj = { type: obj.type, id: obj.id, tags: {}, members: [], nodeRefs: null, lat: null, lon: null };
+    let mapOld = oldObj, mapNew = newObj;
+    if (action === "create") mapOld = emptyObj;
+    if (action === "delete") mapNew = emptyObj;
+    if (oldUnavailable || (action === "modify" && !oldObj)) mapOld = mapNew;
+    const mapView = buildMapView(mapOld || emptyObj, mapNew || emptyObj);
+    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView, map: mapView });
     card.appendChild(previewView);
     card.appendChild(diffView);
     card.appendChild(rawView);
+    card.appendChild(mapView);
     return card;
   }
   async function loadChangesetView(id) {
