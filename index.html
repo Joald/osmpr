@@ -337,9 +337,10 @@ if (typeof document !== "undefined") {
     const client = getClientId();
     if (t && t.access_token) {
       $("authStatus").textContent = t.expires_at ? "Logged in to OSM (token expires: " + new Date(t.expires_at).toLocaleString() + ")." : "Logged in to OSM.";
-      $("loginBtn").disabled = true;
+      $("loginBtn").hidden = true;
     } else {
-      $("authStatus").textContent = client ? "Not logged in yet. Click Log in with OSM, then Upload." : "Set the OAuth client ID below first, then log in.";
+      $("authStatus").textContent = "Not logged in yet. Click Log in with OSM, then Upload.";
+      $("loginBtn").hidden = false;
       $("loginBtn").disabled = !client;
     }
     updateUploadButton();
