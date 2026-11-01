@@ -577,7 +577,7 @@ if (typeof document !== "undefined") {
       $("authStatus").textContent = "";
       $("loginBtn").hidden = true;
     } else {
-      $("authStatus").textContent = "Not logged in yet. Click Log in with OSM, then Upload.";
+      $("authStatus").textContent = "";
       $("loginBtn").hidden = false;
       $("loginBtn").disabled = !client;
     }
