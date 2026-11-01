@@ -104,7 +104,7 @@
 <main>
 
   <section>
-    <h2>Preview</h2>
+    <h2 id="viewHeader" hidden></h2>
     <div id="preview"><p class="muted">Nothing to preview yet.</p></div>
   </section>
 
@@ -666,6 +666,7 @@ if (typeof document !== "undefined") {
     };
   }
   async function loadPreview() {
+    $("viewHeader").hidden = true;
     $("preview").innerHTML = "";
     if (!prefill) { $("preview").appendChild(el("p", "Nothing to preview yet.", "muted")); updateUploadButton(); return; }
     $("commentInput").value = prefill.comment || "";
@@ -894,6 +895,14 @@ if (typeof document !== "undefined") {
   async function loadChangesetView(id) {
     viewMode = "changeset";
     $("oscPreview").hidden = true;
+    const vh = $("viewHeader");
+    vh.innerHTML = "";
+    vh.appendChild(document.createTextNode("Changeset "));
+    const va = document.createElement("a");
+    va.href = "https://www.openstreetmap.org/changeset/" + id;
+    va.target = "_blank"; va.rel = "noopener"; va.textContent = id;
+    vh.appendChild(va);
+    vh.hidden = false;
     $("preview").innerHTML = "";
     $("preview").appendChild(el("p", "Loading changeset " + id + "…", "muted"));
     updateUploadButton();
@@ -910,13 +919,6 @@ if (typeof document !== "undefined") {
       for (const e of entries) counts[e.action]++;
       $("preview").innerHTML = "";
       const head = el("div", null, "panel");
-      const h = el("h3", null);
-      h.appendChild(document.createTextNode("Changeset "));
-      const a = document.createElement("a");
-      a.href = "https://www.openstreetmap.org/changeset/" + id;
-      a.target = "_blank"; a.rel = "noopener"; a.textContent = id;
-      h.appendChild(a);
-      head.appendChild(h);
       if (meta.tags && meta.tags.comment) head.appendChild(el("p", meta.tags.comment));
       head.appendChild(el("p", "by " + meta.user + " · created " + meta.created_at + (meta.closed_at ? " · closed " + meta.closed_at : " · open") + " · " + counts.create + " created, " + counts.modify + " modified, " + counts.delete + " deleted", "muted small"));
       if (entries.length > 100) head.appendChild(el("p", "Large changeset: previous versions not fetched for diff.", "note"));
