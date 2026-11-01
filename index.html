@@ -77,6 +77,10 @@
   dialog::backdrop { background: rgba(0,0,0,0.65); }
   #helpBtn { min-width: 38px; padding: 8px 0; text-align: center; border-radius: 50%; font-weight: bold; }
   #toast { position: fixed; right: 16px; bottom: 16px; z-index: 50; max-width: min(92vw, 480px); margin: 0; }
+  .switch { display: inline-flex; }
+  .switch button { border-radius: 0; }
+  .switch button:first-child { border-top-left-radius: 8px; border-bottom-left-radius: 8px; }
+  .switch button:last-child { border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
   a { color: #7fb3e8; }
 </style>
 </head>
@@ -442,21 +446,39 @@ if (typeof document !== "undefined") {
     div.appendChild(pre);
     return div;
   }
-  function cardHeader(titleNode) {
-    // Header row with Diff/Raw toggles top-right; caller wires the panels.
+  function makeSwitch() {
+    // Segmented Preview / Diff / Raw control; caller wires the views.
+    const wrap = el("div", null, "switch");
+    const btns = {};
+    for (const name of ["Preview", "Diff", "Raw"]) {
+      const b = el("button", name, name === "Preview" ? "" : "secondary");
+      b.type = "button";
+      wrap.appendChild(b);
+      btns[name.toLowerCase()] = b;
+    }
+    return { wrap, btns };
+  }
+  function wireSwitch(btns, views) {
+    const show = (which) => {
+      for (const k of ["preview", "diff", "raw"]) {
+        views[k].hidden = (k !== which);
+        btns[k].classList.toggle("secondary", k !== which);
+      }
+    };
+    btns.preview.addEventListener("click", () => show("preview"));
+    btns.diff.addEventListener("click", () => show("diff"));
+    btns.raw.addEventListener("click", () => show("raw"));
+  }
+  function cardHeaderWithSwitch(titleNode) {
     const header = el("div", null, "row");
     const h = el("h3", null);
     h.style.flex = "1";
     h.style.margin = "0";
     h.appendChild(titleNode);
     header.appendChild(h);
-    const diffBtn = el("button", "Diff", "secondary");
-    diffBtn.type = "button";
-    const rawBtn = el("button", "Raw", "secondary");
-    rawBtn.type = "button";
-    header.appendChild(diffBtn);
-    header.appendChild(rawBtn);
-    return { header, diffBtn, rawBtn };
+    const sw = makeSwitch();
+    header.appendChild(sw.wrap);
+    return { header, btns: sw.btns };
   }
   let toastTimer = null;
   function showToast(changesetId) {
@@ -658,47 +680,48 @@ if (typeof document !== "undefined") {
       card.appendChild(el("p", "Error: " + item.error, "del"));
       return;
     }
-    const { header, diffBtn, rawBtn } = cardHeader(title);
+    const { header, btns } = cardHeaderWithSwitch(title);
     card.appendChild(header);
     if (item.conflict) {
       card.appendChild(el("p", "⚠ Version conflict: prefill expected v" + c.version + ", live is v" + item.current.version + ". Rebase before uploading.", "note"));
     }
     const cur = item.current, comp = item.computed;
+    const previewView = document.createElement("div");
     if (c.type === "relation") {
       const d = diffMembers(cur.members, comp.members);
       if (d.added.length || d.removed.length) {
-        card.appendChild(el("h3", "Members: " + cur.members.length + " -> " + comp.members.length));
+        previewView.appendChild(el("h3", "Members: " + cur.members.length + " -> " + comp.members.length));
         if (d.added.length) {
-          card.appendChild(el("p", "Added:", "add"));
+          previewView.appendChild(el("p", "Added:", "add"));
           const ul = el("ul", null, "diff");
           for (const m of d.added) ul.appendChild(memberLi("+", m, "add"));
-          card.appendChild(ul);
+          previewView.appendChild(ul);
         }
         if (d.removed.length) {
-          card.appendChild(el("p", "Removed:", "del"));
+          previewView.appendChild(el("p", "Removed:", "del"));
           const ul = el("ul", null, "diff");
           for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
-          card.appendChild(ul);
+          previewView.appendChild(ul);
         }
       }
     }
     const td = diffTags(cur.tags, comp.tags);
     if (td.length) {
-      card.appendChild(el("h3", "Tags changed:"));
+      previewView.appendChild(el("h3", "Tags changed:"));
       const ul = el("ul", null, "diff");
       for (const t of td) {
         ul.appendChild(el("li", t.key + ": " + (t.from === null ? "(new)" : JSON.stringify(t.from)) + " -> " + (t.to === null ? "(deleted)" : JSON.stringify(t.to))));
       }
-      card.appendChild(ul);
+      previewView.appendChild(ul);
     }
-    if (!comp.changed && !item.conflict) card.appendChild(el("p", "The proposed changes will not modify this object.", "muted"));
-    for (const n of comp.notes) card.appendChild(el("p", (n.kind === "warn" ? "⚠ " : "• ") + n.text, n.kind === "warn" ? "note" : "muted"));
-    const diffPanel = buildDiffPanel(cur.tags, cur.members, comp.tags, comp.members, c.type === "relation");
-    const rawPanel = buildRawPanel(c);
-    diffBtn.addEventListener("click", () => { diffPanel.hidden = !diffPanel.hidden; });
-    rawBtn.addEventListener("click", () => { rawPanel.hidden = !rawPanel.hidden; });
-    card.appendChild(diffPanel);
-    card.appendChild(rawPanel);
+    if (!comp.changed && !item.conflict) previewView.appendChild(el("p", "The proposed changes will not modify this object.", "muted"));
+    for (const n of comp.notes) previewView.appendChild(el("p", (n.kind === "warn" ? "⚠ " : "• ") + n.text, n.kind === "warn" ? "note" : "muted"));
+    const diffView = buildDiffPanel(cur.tags, cur.members, comp.tags, comp.members, c.type === "relation");
+    const rawView = buildRawPanel(c);
+    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView });
+    card.appendChild(previewView);
+    card.appendChild(diffView);
+    card.appendChild(rawView);
   }
   function changedItems() {
     return items.filter((it) => it.current && it.computed && it.computed.changed && !it.conflict && !it.error);
@@ -792,48 +815,49 @@ if (typeof document !== "undefined") {
     else if (action === "delete") title.appendChild(document.createTextNode(" (deleted)"));
     else if (oldObj) title.appendChild(document.createTextNode(" (base revision v" + oldObj.version + ")"));
     else title.appendChild(document.createTextNode(" (v" + obj.version + ")"));
-    const { header, diffBtn, rawBtn } = cardHeader(title);
+    const { header, btns } = cardHeaderWithSwitch(title);
     card.appendChild(header);
     if (oldUnavailable) card.appendChild(el("p", "Previous version unavailable — diff shows new state only.", "note"));
     const oldTags = (oldObj && oldObj.tags) || {};
     const oldMembers = (oldObj && oldObj.members) || [];
     const newTags = (newObj && newObj.tags) || {};
     const newMembers = (newObj && newObj.members) || [];
+    const previewView = document.createElement("div");
     if (obj.type === "relation") {
       const d = diffMembers(oldMembers, newMembers);
       if (d.added.length || d.removed.length) {
-        card.appendChild(el("h3", "Members: " + oldMembers.length + " -> " + newMembers.length));
+        previewView.appendChild(el("h3", "Members: " + oldMembers.length + " -> " + newMembers.length));
         if (d.added.length) {
-          card.appendChild(el("p", "Added:", "add"));
+          previewView.appendChild(el("p", "Added:", "add"));
           const ul = el("ul", null, "diff");
           for (const m of d.added) ul.appendChild(memberLi("+", m, "add"));
-          card.appendChild(ul);
+          previewView.appendChild(ul);
         }
         if (d.removed.length) {
-          card.appendChild(el("p", "Removed:", "del"));
+          previewView.appendChild(el("p", "Removed:", "del"));
           const ul = el("ul", null, "diff");
           for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
-          card.appendChild(ul);
+          previewView.appendChild(ul);
         }
       }
     }
     const td = diffTags(oldTags, newTags);
     if (td.length) {
-      card.appendChild(el("h3", "Tags changed:"));
+      previewView.appendChild(el("h3", "Tags changed:"));
       const ul = el("ul", null, "diff");
       for (const t of td) {
         ul.appendChild(el("li", t.key + ": " + (t.from === null ? "(new)" : JSON.stringify(t.from)) + " -> " + (t.to === null ? "(deleted)" : JSON.stringify(t.to))));
       }
-      card.appendChild(ul);
+      previewView.appendChild(ul);
     }
     const md = obj.type === "relation" ? diffMembers(oldMembers, newMembers) : null;
-    if (!td.length && (!md || (!md.added.length && !md.removed.length))) card.appendChild(el("p", "No differences", "muted"));
-    const diffPanel = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation");
-    const rawPanel = buildRawPanel(newObj || oldObj);
-    diffBtn.addEventListener("click", () => { diffPanel.hidden = !diffPanel.hidden; });
-    rawBtn.addEventListener("click", () => { rawPanel.hidden = !rawPanel.hidden; });
-    card.appendChild(diffPanel);
-    card.appendChild(rawPanel);
+    if (!td.length && (!md || (!md.added.length && !md.removed.length))) previewView.appendChild(el("p", "No differences", "muted"));
+    const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation");
+    const rawView = buildRawPanel(newObj || oldObj);
+    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView });
+    card.appendChild(previewView);
+    card.appendChild(diffView);
+    card.appendChild(rawView);
     return card;
   }
   async function loadChangesetView(id) {
