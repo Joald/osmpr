@@ -574,7 +574,7 @@ if (typeof document !== "undefined") {
     const t = getTokens();
     const client = getClientId();
     if (t && t.access_token) {
-      $("authStatus").textContent = t.expires_at ? "Logged in (token expires: " + new Date(t.expires_at).toLocaleString() + ")." : "Logged in.";
+      $("authStatus").textContent = "";
       $("loginBtn").hidden = true;
     } else {
       $("authStatus").textContent = "Not logged in yet. Click Log in with OSM, then Upload.";
