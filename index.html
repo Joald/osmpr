@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OSMPR</title>
+<!--
+  OSMPR — a single-file, zero-dependency, zero-backend editor
+  for OpenStreetMap relation member edits (and tag edits).
+
+  How it works:
+    1. Anyone builds a link with the intended change encoded
+       in the URL. See the "Link format" section at the bottom of the page
+       and README.md for the exact format.
+    2. This page fetches the CURRENT objects from the OSM API (public read),
+       applies the operations, and shows a diff preview.
+    3. You log in once with OSM (OAuth 2.0 + PKCE, scope: write_api only).
+       Tokens are stored in this page's localStorage, on this origin only.
+    4. You click Upload. The page creates one changeset, uploads every
+       changed object, and closes the changeset.
+
+  Security notes:
+    - No third-party scripts, fonts, analytics, or tracking. Everything
+      inline, so the page can be audited by reading this one file.
+    - Tokens never leave the browser except to openstreetmap.org itself
+      (the OAuth token endpoint and the API). They are never sent to any
+      other host, never put in a URL, and never written into the repo.
+    - The OAuth client_id is public by design (PKCE public client, no
+      client secret). Only the token is sensitive, and it lives in
+      localStorage, revocable at any time from OSM My Settings ->
+      Authorized applications. Use Log out here to wipe it.
+    - Upload requires an https origin (e.g. GitHub Pages). Opening this
+      file directly (file://) can preview diffs, but OSM cannot redirect
+      an OAuth flow back to a file:// URL, so login will not complete
+      from a local file. Use the hosted URL for uploads.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #121417; color: #e8e8e8; line-height: 1.45; }
+  header, main, footer { max-width: 900px; margin: 0 auto; padding: 0 16px; }
+  header { padding-top: 24px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 24px 0 8px; }
+  h3 { font-size: 1rem; margin: 16px 0 6px; }
+  p, li { font-size: 0.95rem; }
+  .muted { color: #9aa0a6; }
+  .small { font-size: 0.85rem; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: #1f2328; padding: 1px 5px; border-radius: 4px; font-size: 0.88em; word-break: break-all; }
+  pre { background: #1f2328; padding: 12px; border-radius: 8px; overflow: auto; font-size: 0.82rem; white-space: pre-wrap; word-break: break-all; }
+  .panel { background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .warn { border-color: #8a6d1a; background: #221d0e; }
+  .error { border-color: #8a2a2a; background: #241414; }
+  .ok { border-color: #2a6b3a; background: #14231a; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button, input[type="text"], textarea { font: inherit; }
+  button { background: #2b6cb0; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:hover { background: #2f7ac4; }
+  button:disabled { background: #3a3f44; color: #9aa0a6; cursor: not-allowed; }
+  button.secondary { background: #2a2e33; }
+  button.danger { background: #8a2a2a; }
+  input[type="text"] { background: #121417; color: #e8e8e8; border: 1px solid #3a3f44; border-radius: 8px; padding: 8px 10px; min-width: 260px; flex: 1; }
+  textarea { background: #121417; color: #e8e8e8; border: 1px solid #3a3f44; border-radius: 8px; padding: 8px 10px; width: 100%; }
+  .obj { background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .obj h3 { margin-top: 0; }
+  ul.diff { list-style: none; padding: 0; margin: 6px 0; }
+  ul.diff li { padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
+  .add { color: #7ee787; }
+  .del { color: #ff7b72; }
+  .note { color: #e3b341; }
+  details { margin: 8px 0; }
+  summary { cursor: pointer; }
+  #log p { margin: 4px 0; }
+  footer { padding-bottom: 32px; }
+  a { color: #7fb3e8; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OSMPR</h1>
+  <p class="muted">Open a prefill link, check the diff, click Upload. One changeset, no desktop editor, no Level0 syntax.</p>
+  <div id="authBar" class="panel row">
+    <span id="authStatus" class="muted">Checking login…</span>
+    <span style="flex:1"></span>
+    <button id="loginBtn" type="button">Log in with OSM</button>
+    <button id="logoutBtn" type="button" class="secondary">Log out</button>
+  </div>
+</header>
+<main>
+  <section id="setupPanel" class="panel warn" hidden>
+    <h2>One-time setup: OSM OAuth application</h2>
+    <p>This page needs an OSM OAuth 2.0 <strong>public client</strong> (PKCE, no secret). Register it once on OpenStreetMap: open <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener">openstreetmap.org</a>, go to My Settings → OAuth 2 Applications → Register new application, with:</p>
+    <ul>
+      <li>Redirect URI: <code id="redirectUri"></code> <button id="copyRedirectBtn" type="button" class="secondary">Copy</button></li>
+      <li>Permissions: only <code>Modify the map</code> (scope <code>write_api</code>)</li>
+      <li>Confidential application: <strong>no</strong> (this is a browser-only public client)</li>
+    </ul>
+    <p>Then paste the client ID it gives you here (it is public, not a secret):</p>
+    <div class="row">
+      <input id="clientIdInput" type="text" placeholder="OSM OAuth client ID" autocomplete="off" spellcheck="false">
+      <button id="saveClientIdBtn" type="button">Save client ID</button>
+    </div>
+    <p class="small muted">Saved in this browser's localStorage, on this page's origin only. Links can also include it in links as <code>?client_id=…</code>, so you only ever type it once.</p>
+  </section>
+
+  <section id="prefillPanel" class="panel">
+    <h2>Prefilled change</h2>
+    <div id="prefillStatus" class="muted">No prefill in this link. Use the link format below, or load the demo.</div>
+    <div class="row" style="margin-top:8px">
+      <button id="demoBtn" type="button" class="secondary">Load demo (already-applied fix — preview only)</button>
+      <button id="rebaseBtn" type="button" class="secondary" hidden>Rebase on current versions</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Preview</h2>
+    <div id="preview"><p class="muted">Nothing to preview yet.</p></div>
+  </section>
+
+  <section class="panel">
+    <h2>Changeset</h2>
+    <label for="commentInput" class="small muted">Comment (editable before upload):</label>
+    <textarea id="commentInput" rows="3" placeholder="Changeset comment…"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button id="uploadBtn" type="button" disabled>Upload to OSM</button>
+      <button id="oscBtn" type="button" class="secondary">Show osmChange XML</button>
+      <button id="downloadOscBtn" type="button" class="secondary">Download .osc</button>
+      <button id="closeCsBtn" type="button" class="secondary" hidden>Close open changeset</button>
+    </div>
+    <pre id="oscPreview" hidden></pre>
+  </section>
+
+  <section id="log" class="panel">
+    <h2 style="margin-top:0">Log</h2>
+    <div id="logBody"></div>
+  </section>
+
+  <details>
+    <summary><strong>Link format</strong></summary>
+    <p>Primary format — one URL parameter <code>d</code> with base64url-encoded JSON (UTF-8). No geometry, no full member lists: only the operations. The page fetches current objects from the OSM API and applies them.</p>
+    <pre>{
+  "comment": "Changeset comment",
+  "changes": [
+    {
+      "type": "relation", "id": 175342, "version": 217,
+      "add":    [{ "type": "relation", "id": 51805, "role": "subarea" }],
+      "remove": [{ "type": "relation", "id": 51805, "role": "subarea" }],
+      "tags":   { "name": "New name", "old_key": null }
+    }
+  ]
+}</pre>
+    <ul>
+      <li><code>version</code> is optional. If present and the live version differs, upload is blocked until you click Rebase (refetch + re-apply).</li>
+      <li><code>add</code> entries already present (same type + id + role) are skipped with a note; <code>remove</code> entries not present produce a warning. Neither is fatal.</li>
+      <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
+      <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
+      <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
+    </ul>
+    <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins. Add <code>client_id=…</code> to save the OAuth client ID on first open.</p>
+  </details>
+</main>
+<footer>
+  <p class="small muted">Single static file, no backend, no third-party code. Tokens: localStorage on this origin only, refresh token kept alongside; Log out wipes both. Revoke anytime from OSM My Settings → Authorized applications. Opening this file via <code>file://</code> can preview diffs, but login needs the https hosted URL, because OSM must redirect back to a registered https address.</p>
+</footer>
+<script>
+"use strict";
+/* ================= pure logic (also unit-tested under node) ================= */
+const API_BASE = "https://www.openstreetmap.org/api/0.6";
+const AUTH_URL = "https://www.openstreetmap.org/oauth2/authorize";
+const TOKEN_URL = "https://www.openstreetmap.org/oauth2/token";
+const LS_TOKENS = "osmpr.tokens";
+const LS_CLIENT = "osmpr.client_id";
+const SS_VERIFIER = "osmpr.verifier";
+const SS_STATE = "osmpr.state";
+
+function b64urlEncode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(str) {
+  const pad = "=".repeat((4 - (str.length % 4)) % 4);
+  const bin = atob(str.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+function escapeXml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function memberKey(m) { return m.type + ":" + m.ref + ":" + (m.role || ""); }
+function normType(t) {
+  const x = String(t).toLowerCase();
+  if (x === "n" || x === "node") return "node";
+  if (x === "w" || x === "way") return "way";
+  if (x === "r" || x === "rel" || x === "relation") return "relation";
+  return null;
+}
+function parseMemberSpec(spec) {
+  const parts = String(spec).split(":");
+  const type = normType(parts[0]);
+  const id = parseInt(parts[1], 10);
+  if (!type || !Number.isFinite(id)) return null;
+  return { type, ref: id, role: parts.slice(2).join(":") || "" };
+}
+function parsePrefill(search) {
+  const params = new URLSearchParams(search);
+  const d = params.get("d");
+  if (d) {
+    const obj = JSON.parse(b64urlDecode(d));
+    if (!obj || !Array.isArray(obj.changes)) throw new Error("Prefill JSON must have a 'changes' array.");
+    const changes = obj.changes.map((c) => {
+      const type = normType(c.type);
+      if (!type || !Number.isFinite(c.id)) throw new Error("Each change needs a valid type and id.");
+      return {
+        type, id: c.id,
+        version: Number.isFinite(c.version) ? c.version : null,
+        add: (c.add || []).map((m) => ({ type: normType(m.type), ref: m.id, role: m.role || "" })),
+        remove: (c.remove || []).map((m) => ({ type: normType(m.type), ref: m.id, role: m.role || "", roleGiven: m.role !== undefined && m.role !== null })),
+        tags: c.tags || {},
+      };
+    });
+    return { comment: obj.comment || "", changes };
+  }
+  const rel = params.get("rel");
+  if (rel) {
+    const id = parseInt(rel, 10);
+    if (!Number.isFinite(id)) throw new Error("Invalid rel id.");
+    const add = params.getAll("add").flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean).map(parseMemberSpec).filter(Boolean)
+      .map((m) => ({ type: m.type, ref: m.ref, role: m.role }));
+    const remove = params.getAll("del").flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean).map((s) => {
+      const m = parseMemberSpec(s);
+      if (!m) return null;
+      const roleGiven = s.split(":").length > 2;
+      return { type: m.type, ref: m.ref, role: m.role, roleGiven };
+    }).filter(Boolean);
+    const v = params.get("v");
+    return { comment: params.get("comment") || "", changes: [{ type: "relation", id, version: v ? parseInt(v, 10) : null, add, remove, tags: {} }] };
+  }
+  return null;
+}
+function applyOps(current, ops) {
+  const notes = [];
+  let members = current.members.map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" }));
+  if ((ops.add.length || ops.remove.length) && current.type !== "relation") {
+    throw new Error("Member operations only apply to relations, not to " + current.type + " " + current.id + ".");
+  }
+  for (const r of ops.remove) {
+    const before = members.length;
+    members = members.filter((m) => !(m.type === r.type && m.ref === r.ref && (!r.roleGiven || m.role === r.role)));
+    const n = before - members.length;
+    if (n === 0) notes.push({ kind: "warn", text: "Remove target not present: " + r.type + " " + r.ref + (r.roleGiven ? " (" + r.role + ")" : "") });
+    else if (n > 1) notes.push({ kind: "note", text: "Removed " + n + " matching members: " + r.type + " " + r.ref });
+  }
+  for (const a of ops.add) {
+    if (members.some((m) => memberKey(m) === memberKey(a))) {
+      notes.push({ kind: "note", text: "Already present, skipped: " + a.type + " " + a.ref + " (" + (a.role || "(no role)") + ")" });
+    } else {
+      members.push({ type: a.type, ref: a.ref, role: a.role || "" });
+    }
+  }
+  const tags = Object.assign({}, current.tags);
+  for (const [k, v] of Object.entries(ops.tags || {})) {
+    if (v === null) {
+      if (k in tags) delete tags[k];
+      else notes.push({ kind: "warn", text: "Tag to delete not present: " + k });
+    } else if (tags[k] !== v) {
+      tags[k] = v;
+    }
+  }
+  const changed = JSON.stringify(members) !== JSON.stringify(current.members.map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" })))
+    || JSON.stringify(tags) !== JSON.stringify(current.tags);
+  return { members, tags, notes, changed };
+}
+function diffMembers(oldMembers, newMembers) {
+  const oldKeys = new Set(oldMembers.map(memberKey));
+  const newKeys = new Set(newMembers.map(memberKey));
+  return {
+    added: newMembers.filter((m) => !oldKeys.has(memberKey(m))),
+    removed: oldMembers.filter((m) => !newKeys.has(memberKey(m))),
+    unchangedCount: oldMembers.filter((m) => newKeys.has(memberKey(m))).length,
+  };
+}
+function diffTags(oldTags, newTags) {
+  const out = [];
+  const keys = new Set([...Object.keys(oldTags), ...Object.keys(newTags)]);
+  for (const k of keys) {
+    if (!(k in newTags)) out.push({ key: k, from: oldTags[k], to: null });
+    else if (!(k in oldTags)) out.push({ key: k, from: null, to: newTags[k] });
+    else if (oldTags[k] !== newTags[k]) out.push({ key: k, from: oldTags[k], to: newTags[k] });
+  }
+  return out;
+}
+function buildObjectXml(type, id, version, changesetId, state, lat, lon) {
+  let s = "<" + type + " id=\"" + id + "\" version=\"" + version + "\" changeset=\"" + changesetId + "\"";
+  if (type === "node") s += " lat=\"" + lat + "\" lon=\"" + lon + "\"";
+  s += ">";
+  if (type === "way") {
+    for (const nd of state.nodeRefs || []) s += "<nd ref=\"" + nd + "\"/>";
+  }
+  if (type === "relation") {
+    for (const m of state.members) s += "<member type=\"" + m.type + "\" ref=\"" + m.ref + "\" role=\"" + escapeXml(m.role || "") + "\"/>";
+  }
+  const keys = Object.keys(state.tags).sort();
+  for (const k of keys) s += "<tag k=\"" + escapeXml(k) + "\" v=\"" + escapeXml(state.tags[k]) + "\"/>";
+  s += "</" + type + ">";
+  return s;
+}
+function buildOsmChange(changesetId, items) {
+  let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osmChange version=\"0.6\" generator=\"osmpr\">\n  <modify>\n";
+  for (const it of items) {
+    s += "    " + buildObjectXml(it.type, it.id, it.version, changesetId, it.state, it.lat, it.lon) + "\n";
+  }
+  s += "  </modify>\n</osmChange>\n";
+  return s;
+}
+
+/* ================= browser UI (skipped under node) ================= */
+if (typeof document !== "undefined") {
+  const $ = (id) => document.getElementById(id);
+  let prefill = null;
+  let items = []; // {change, current, computed, conflict, error}
+  let openChangesetId = null;
+
+  function log(msg, cls) {
+    const p = document.createElement("p");
+    p.textContent = msg;
+    if (cls) p.className = cls;
+    $("logBody").appendChild(p);
+  }
+  function el(tag, text, cls) {
+    const n = document.createElement(tag);
+    if (text !== undefined && text !== null) n.textContent = text;
+    if (cls) n.className = cls;
+    return n;
+  }
+  function getClientId() {
+    try { return localStorage.getItem(LS_CLIENT) || ""; } catch (e) { return ""; }
+  }
+  function setClientId(v) {
+    try { localStorage.setItem(LS_CLIENT, v); } catch (e) { /* storage unavailable */ }
+  }
+  function getTokens() {
+    try { return JSON.parse(localStorage.getItem(LS_TOKENS) || "null"); } catch (e) { return null; }
+  }
+  function setTokens(t) {
+    try { localStorage.setItem(LS_TOKENS, JSON.stringify(t)); } catch (e) { /* storage unavailable */ }
+  }
+  function clearTokens() {
+    try { localStorage.removeItem(LS_TOKENS); } catch (e) { /* ignore */ }
+  }
+  function refreshAuthBar() {
+    const t = getTokens();
+    const client = getClientId();
+    $("setupPanel").hidden = !!client;
+    if (t && t.access_token) {
+      const exp = t.expires_at ? new Date(t.expires_at).toLocaleString() : "unknown expiry";
+      $("authStatus").textContent = "Logged in to OSM (token expires: " + exp + ").";
+      $("loginBtn").disabled = true;
+    } else {
+      $("authStatus").textContent = client ? "Not logged in yet. Click Log in with OSM, then Upload." : "Set the OAuth client ID below first, then log in.";
+      $("loginBtn").disabled = !client;
+    }
+    updateUploadButton();
+  }
+  function updateUploadButton() {
+    const anyChanged = items.some((it) => it.computed && it.computed.changed && !it.conflict && !it.error);
+    const anyConflict = items.some((it) => it.conflict);
+    const loggedIn = !!(getTokens() && getTokens().access_token);
+    $("uploadBtn").disabled = !(loggedIn && anyChanged && !anyConflict && items.length > 0);
+    $("rebaseBtn").hidden = !anyConflict;
+  }
+  function randomString(len) {
+    const arr = new Uint8Array(len);
+    crypto.getRandomValues(arr);
+    return Array.from(arr, (b) => ("0" + b.toString(16)).slice(-2)).join("");
+  }
+  async function pkceChallenge(verifier) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    let bin = "";
+    for (const b of new Uint8Array(digest)) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  async function login() {
+    const client = getClientId();
+    if (!client) { log("Set the OAuth client ID first.", "note"); return; }
+    if (!window.crypto || !crypto.subtle) {
+      log("OAuth needs a secure context (https). Open the hosted GitHub Pages URL, not a local file and not plain http.", "note");
+      return;
+    }
+    const verifier = randomString(64);
+    const state = randomString(32);
+    sessionStorage.setItem(SS_VERIFIER, verifier);
+    sessionStorage.setItem(SS_STATE, state);
+    const challenge = await pkceChallenge(verifier);
+    const redirect = location.origin + location.pathname;
+    const url = AUTH_URL + "?response_type=code&client_id=" + encodeURIComponent(client)
+      + "&redirect_uri=" + encodeURIComponent(redirect)
+      + "&scope=" + encodeURIComponent("write_api")
+      + "&code_challenge=" + encodeURIComponent(challenge)
+      + "&code_challenge_method=S256&state=" + encodeURIComponent(state);
+    location.href = url;
+  }
+  async function handleCallback() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    if (!code) return false;
+    if (state !== sessionStorage.getItem(SS_STATE)) {
+      log("OAuth state mismatch — possible CSRF. Login aborted; try again.", "note");
+      return true;
+    }
+    const verifier = sessionStorage.getItem(SS_VERIFIER);
+    const client = getClientId();
+    const redirect = location.origin + location.pathname;
+    const body = new URLSearchParams({
+      grant_type: "authorization_code", code, redirect_uri: redirect,
+      client_id: client, code_verifier: verifier,
+    });
+    const res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+    if (!res.ok) {
+      log("Token exchange failed (" + res.status + "): " + (await res.text()).slice(0, 300), "note");
+      return true;
+    }
+    const data = await res.json();
+    setTokens({ access_token: data.access_token, refresh_token: data.refresh_token || null, expires_at: data.expires_in ? Date.now() + data.expires_in * 1000 : null });
+    sessionStorage.removeItem(SS_VERIFIER);
+    sessionStorage.removeItem(SS_STATE);
+    history.replaceState(null, "", location.pathname + location.hash);
+    log("Logged in. Token saved in this browser's localStorage.");
+    return true;
+  }
+  async function getValidToken() {
+    let t = getTokens();
+    if (!t || !t.access_token) return null;
+    if (t.expires_at && Date.now() > t.expires_at - 60000) {
+      if (!t.refresh_token) return t.access_token;
+      const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: t.refresh_token, client_id: getClientId() });
+      const res = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+      if (!res.ok) {
+        clearTokens();
+        log("Refresh token rejected — please log in again.", "note");
+        refreshAuthBar();
+        return null;
+      }
+      const data = await res.json();
+      t = { access_token: data.access_token, refresh_token: data.refresh_token || t.refresh_token, expires_at: data.expires_in ? Date.now() + data.expires_in * 1000 : null };
+      setTokens(t);
+    }
+    return t.access_token;
+  }
+  async function fetchObject(change) {
+    const res = await fetch(API_BASE + "/" + change.type + "/" + change.id + ".json");
+    if (!res.ok) throw new Error("Fetch failed (" + res.status + ") for " + change.type + " " + change.id);
+    const data = await res.json();
+    const obj = (data.elements || []).find((e) => e.type === change.type && e.id === change.id);
+    if (!obj) throw new Error("Object not found: " + change.type + " " + change.id);
+    return {
+      type: change.type, id: change.id, version: obj.version, timestamp: obj.timestamp,
+      tags: obj.tags || {},
+      members: (obj.members || []).map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" })),
+      nodeRefs: obj.nodes || null, lat: obj.lat, lon: obj.lon,
+    };
+  }
+  async function loadPreview() {
+    $("preview").innerHTML = "";
+    if (!prefill) { $("preview").appendChild(el("p", "Nothing to preview yet.", "muted")); updateUploadButton(); return; }
+    $("commentInput").value = prefill.comment || "";
+    items = [];
+    for (const change of prefill.changes) {
+      const card = el("div", null, "obj");
+      card.appendChild(el("h3", change.type + " " + change.id));
+      card.appendChild(el("p", "Loading current version from OSM…", "muted"));
+      $("preview").appendChild(card);
+      const item = { change, current: null, computed: null, conflict: false, error: null, card };
+      items.push(item);
+      try {
+        const current = await fetchObject(change);
+        item.current = current;
+        if (change.version !== null && change.version !== current.version) {
+          item.conflict = true;
+          log("Version conflict on " + change.type + " " + change.id + ": prefill expected v" + change.version + ", live is v" + current.version + ". Click Rebase to refetch and re-apply.", "note");
+        }
+        item.computed = applyOps(current, change);
+        renderItem(item);
+      } catch (e) {
+        item.error = e.message;
+        renderItem(item);
+      }
+      updateUploadButton();
+    }
+  }
+  function renderItem(item) {
+    const card = item.card;
+    card.innerHTML = "";
+    const c = item.change;
+    card.appendChild(el("h3", c.type + " " + c.id + (item.current ? "  (v" + item.current.version + " → v" + (item.current.version + 1) + ")" : "")));
+    if (item.error) {
+      card.appendChild(el("p", "Error: " + item.error, "del"));
+      return;
+    }
+    if (item.conflict) {
+      card.appendChild(el("p", "⚠ Version conflict: prefill expected v" + c.version + ", live is v" + item.current.version + ". Rebase before uploading.", "note"));
+    }
+    const cur = item.current, comp = item.computed;
+    if (cur.tags && cur.tags.name) card.appendChild(el("p", "Name: " + cur.tags.name, "muted"));
+    if (c.type === "relation") {
+      const d = diffMembers(cur.members, comp.members);
+      const h = el("h3", "Members: " + cur.members.length + " → " + comp.members.length);
+      card.appendChild(h);
+      if (d.added.length) {
+        card.appendChild(el("p", "Added:", "add"));
+        const ul = el("ul", null, "diff");
+        for (const m of d.added) ul.appendChild(el("li", "+ " + m.type + " " + m.ref + " (" + (m.role || "no role") + ")", "add"));
+        card.appendChild(ul);
+      }
+      if (d.removed.length) {
+        card.appendChild(el("p", "Removed:", "del"));
+        const ul = el("ul", null, "diff");
+        for (const m of d.removed) ul.appendChild(el("li", "− " + m.type + " " + m.ref + " (" + (m.role || "no role") + ")", "del"));
+        card.appendChild(ul);
+      }
+      const det = document.createElement("details");
+      det.appendChild(el("summary", "Unchanged members (" + d.unchangedCount + ") — click to expand"));
+      const ul = el("ul", null, "diff");
+      const newKeys = new Set(comp.members.map(memberKey));
+      for (const m of cur.members) if (newKeys.has(memberKey(m))) ul.appendChild(el("li", m.type + " " + m.ref + " (" + (m.role || "no role") + ")"));
+      det.appendChild(ul);
+      card.appendChild(det);
+    }
+    const td = diffTags(cur.tags, comp.tags);
+    if (td.length) {
+      card.appendChild(el("h3", "Tags changed:"));
+      const ul = el("ul", null, "diff");
+      for (const t of td) {
+        ul.appendChild(el("li", t.key + ": " + (t.from === null ? "(new)" : JSON.stringify(t.from)) + " → " + (t.to === null ? "(deleted)" : JSON.stringify(t.to))));
+      }
+      card.appendChild(ul);
+    }
+    if (!comp.changed && !item.conflict) card.appendChild(el("p", "No change for this object (operations already applied or no-ops). It will be skipped on upload.", "muted"));
+    for (const n of comp.notes) card.appendChild(el("p", (n.kind === "warn" ? "⚠ " : "• ") + n.text, n.kind === "warn" ? "note" : "muted"));
+  }
+  function changedItems() {
+    return items.filter((it) => it.current && it.computed && it.computed.changed && !it.conflict && !it.error);
+  }
+  function currentOscItems() {
+    return changedItems().map((it) => ({ type: it.change.type, id: it.change.id, version: it.current.version, state: it.computed, lat: it.current.lat, lon: it.current.lon }));
+  }
+  async function upload() {
+    const token = await getValidToken();
+    if (!token) { log("Not logged in. Click Log in with OSM first.", "note"); refreshAuthBar(); return; }
+    const toUpload = changedItems();
+    if (!toUpload.length) { log("Nothing changed — nothing to upload.", "note"); return; }
+    const comment = $("commentInput").value.trim();
+    if (!comment) { log("Changeset comment is required.", "note"); return; }
+    $("uploadBtn").disabled = true;
+    try {
+      const csBody = "<osm><changeset><tag k=\"comment\" v=\"" + escapeXml(comment) + "\"/><tag k=\"created_by\" v=\"osmpr\"/></changeset></osm>";
+      let res = await fetch(API_BASE + "/changeset/create", { method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: csBody });
+      if (!res.ok) throw new Error("Changeset create failed (" + res.status + "): " + (await res.text()).slice(0, 300));
+      openChangesetId = (await res.text()).trim();
+      $("closeCsBtn").hidden = false;
+      log("Changeset " + openChangesetId + " created. Uploading " + toUpload.length + " object(s)…");
+      for (const it of toUpload) {
+        const xml = "<osm>" + buildObjectXml(it.change.type, it.change.id, it.current.version, openChangesetId, it.computed, it.current.lat, it.current.lon) + "</osm>";
+        res = await fetch(API_BASE + "/" + it.change.type + "/" + it.change.id, { method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: xml });
+        if (!res.ok) throw new Error("Upload failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
+        const newVer = (await res.text()).trim();
+        log("Uploaded " + it.change.type + " " + it.change.id + " → v" + newVer + ".");
+      }
+      res = await fetch(API_BASE + "/changeset/" + openChangesetId + "/close", { method: "PUT", headers: { Authorization: "Bearer " + token } });
+      if (!res.ok) throw new Error("Changeset close failed (" + res.status + "): " + (await res.text()).slice(0, 300));
+      log("Done. Changeset closed: https://www.openstreetmap.org/changeset/" + openChangesetId);
+      const doneId = openChangesetId;
+      openChangesetId = null;
+      $("closeCsBtn").hidden = true;
+      const panel = el("div", null, "panel ok");
+      panel.appendChild(el("p", "✓ Uploaded successfully. Changeset: "));
+      const a = document.createElement("a");
+      a.href = "https://www.openstreetmap.org/changeset/" + doneId;
+      a.target = "_blank"; a.rel = "noopener"; a.textContent = doneId;
+      panel.querySelector("p").appendChild(a);
+      $("preview").prepend(panel);
+      await loadPreview();
+    } catch (e) {
+      log("Upload error: " + e.message, "note");
+      if (openChangesetId) log("Changeset " + openChangesetId + " is still open. Fix the problem and retry, or close it with the button below.", "note");
+    } finally {
+      updateUploadButton();
+    }
+  }
+  async function rebase() {
+    if (!prefill) return;
+    for (const it of items) if (it.conflict) it.change.version = null;
+    await loadPreview();
+    log("Rebased on current live versions.");
+  }
+  function demoPayload() {
+    return {
+      comment: "Demo change: add relation 51805 as subarea of relation 175342 and remove it from relation 3073100 (already applied — preview only)",
+      changes: [
+        { type: "relation", id: 175342, version: 217, add: [{ type: "relation", id: 51805, role: "subarea" }], remove: [], tags: {} },
+        { type: "relation", id: 3073100, version: 11, add: [], remove: [{ type: "relation", id: 51805, role: "subarea" }], tags: {} },
+      ],
+    };
+  }
+  async function init() {
+    $("redirectUri").textContent = location.origin + location.pathname;
+    const params = new URLSearchParams(location.search);
+    const cid = params.get("client_id");
+    if (cid) { setClientId(cid); log("OAuth client ID saved from link."); }
+    try { await handleCallback(); } catch (e) { log("Login callback error: " + e.message, "note"); }
+    refreshAuthBar();
+    $("loginBtn").addEventListener("click", login);
+    $("logoutBtn").addEventListener("click", () => { clearTokens(); refreshAuthBar(); log("Logged out. Tokens wiped from this browser."); });
+    $("saveClientIdBtn").addEventListener("click", () => {
+      const v = $("clientIdInput").value.trim();
+      if (!v) return;
+      setClientId(v);
+      refreshAuthBar();
+      log("OAuth client ID saved.");
+    });
+    $("copyRedirectBtn").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(location.origin + location.pathname); log("Redirect URI copied."); }
+      catch (e) { log("Copy failed — select the URI text manually.", "note"); }
+    });
+    $("demoBtn").addEventListener("click", () => {
+      prefill = demoPayload();
+      $("prefillStatus").textContent = "Demo loaded: a two-relation member fix that is already live, so the preview should show only already-applied notes and Upload stays disabled.";
+      loadPreview();
+    });
+    $("rebaseBtn").addEventListener("click", rebase);
+    $("uploadBtn").addEventListener("click", upload);
+    $("oscBtn").addEventListener("click", () => {
+      const pre = $("oscPreview");
+      if (!pre.hidden) { pre.hidden = true; return; }
+      pre.textContent = buildOsmChange(openChangesetId || "NEW", currentOscItems());
+      pre.hidden = false;
+    });
+    $("downloadOscBtn").addEventListener("click", () => {
+      const blob = new Blob([buildOsmChange(openChangesetId || "NEW", currentOscItems())], { type: "application/xml" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "prefill-change.osc";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+    $("closeCsBtn").addEventListener("click", async () => {
+      const token = await getValidToken();
+      if (!token || !openChangesetId) return;
+      const res = await fetch(API_BASE + "/changeset/" + openChangesetId + "/close", { method: "PUT", headers: { Authorization: "Bearer " + token } });
+      if (res.ok) { log("Changeset " + openChangesetId + " closed."); openChangesetId = null; $("closeCsBtn").hidden = true; }
+      else log("Close failed (" + res.status + ").", "note");
+    });
+    try {
+      prefill = parsePrefill(location.search);
+      if (prefill) {
+        $("prefillStatus").textContent = "Prefill loaded: " + prefill.changes.length + " object(s), " + prefill.changes.reduce((n, c) => n + c.add.length + c.remove.length, 0) + " member operation(s).";
+        loadPreview();
+      } else {
+        $("prefillStatus").textContent = "No prefill in this link. Open a prefill link, or load the demo below to see the preview.";
+      }
+    } catch (e) {
+      $("prefillStatus").textContent = "Prefill error: " + e.message;
+      log("Prefill error: " + e.message, "note");
+    }
+  }
+  document.addEventListener("DOMContentLoaded", init);
+}
+</script>
+</body>
+</html>
