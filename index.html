@@ -161,6 +161,7 @@
     <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
     <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
     <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry; Diff shows them in a Geometry section.</li>
+    <li>New objects: use a negative id (e.g. <code>-1</code>) in a change. The object is created on upload, and other changes can reference it by that id — list created objects before the changes that reference them.</li>
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
@@ -399,7 +400,10 @@ function buildDiffLines(oldTags, oldMembers, newTags, newMembers, oldGeom, newGe
   return { tagLines, memberLines, geometryLines };
 }
 function buildObjectXml(type, id, version, changesetId, state, lat, lon) {
-  let s = "<" + type + " id=\"" + id + "\" version=\"" + version + "\" changeset=\"" + changesetId + "\"";
+  // version == null means a new object (create): no id/version attributes.
+  let s = "<" + type;
+  if (version != null) s += " id=\"" + id + "\" version=\"" + version + "\"";
+  s += " changeset=\"" + changesetId + "\"";
   if (type === "node") s += " lat=\"" + lat + "\" lon=\"" + lon + "\"";
   s += ">";
   if (type === "way") {
@@ -414,11 +418,21 @@ function buildObjectXml(type, id, version, changesetId, state, lat, lon) {
   return s;
 }
 function buildOsmChange(changesetId, items) {
-  let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osmChange version=\"0.6\" generator=\"osmpr\">\n  <modify>\n";
-  for (const it of items) {
-    s += "    " + buildObjectXml(it.type, it.id, it.version, changesetId, it.state, it.lat, it.lon) + "\n";
+  // New objects (version == null) go in <create>, the rest in <modify>.
+  const creates = items.filter((it) => it.version == null);
+  const modifies = items.filter((it) => it.version != null);
+  let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osmChange version=\"0.6\" generator=\"osmpr\">\n";
+  if (creates.length) {
+    s += "  <create>\n";
+    for (const it of creates) s += "    " + buildObjectXml(it.type, it.id, null, changesetId, it.state, it.lat, it.lon) + "\n";
+    s += "  </create>\n";
   }
-  s += "  </modify>\n</osmChange>\n";
+  if (modifies.length) {
+    s += "  <modify>\n";
+    for (const it of modifies) s += "    " + buildObjectXml(it.type, it.id, it.version, changesetId, it.state, it.lat, it.lon) + "\n";
+    s += "  </modify>\n";
+  }
+  s += "</osmChange>\n";
   return s;
 }
 
@@ -427,6 +441,9 @@ if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
   let prefill = null;
   let items = []; // {change, current, computed, conflict, error}
+  // Prefill-declared geometry by "type:id", for rendering placeholder members
+  // (new objects) on the relation map before they exist on OSM.
+  let prefillComputed = new Map();
   let openChangesetId = null;
   let viewMode = "prefill"; // "prefill" | "changeset"
 
@@ -439,6 +456,12 @@ if (typeof document !== "undefined") {
     return name ? name + " (" + type + ", " + id + ")" : type + " " + id;
   }
   function osmLink(type, id) {
+    if (id < 0) {
+      // Placeholder for a new object (created on upload): no OSM page yet.
+      const s = document.createElement("span");
+      s.className = "add"; s.textContent = "new";
+      return s;
+    }
     const a = document.createElement("a");
     a.href = "https://www.openstreetmap.org/" + type + "/" + id;
     a.target = "_blank"; a.rel = "noopener"; a.textContent = id;
@@ -708,6 +731,17 @@ if (typeof document !== "undefined") {
         if (m.type === "way" && !wayGeom.has(m.ref) && !missing.includes(m.ref)) missing.push(m.ref);
       }
       for (const wid of missing.slice(0, 100)) {
+        if (wid < 0) {
+          // Placeholder way from the prefill: resolve its nodes from the
+          // prefill itself, since it does not exist on OSM yet.
+          const pre = prefillComputed.get("way:" + wid);
+          if (pre && pre.nodeRefs) {
+            const coords = await fetchNodeCoords(pre.nodeRefs);
+            const pts = pre.nodeRefs.map((r) => coords.get(r)).filter(Boolean);
+            if (pts.length >= 2) wayGeom.set(wid, pts);
+          }
+          continue;
+        }
         try {
           const wfull = await fetchObjectFull("way", wid);
           const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(Boolean);
@@ -1008,6 +1042,8 @@ if (typeof document !== "undefined") {
     if (!prefill) { $("preview").appendChild(el("p", "Nothing to preview yet.", "muted")); updateUploadButton(); return; }
     $("commentInput").value = prefill.comment || "";
     items = [];
+    prefillComputed = new Map();
+    for (const ch of prefill.changes) prefillComputed.set(ch.type + ":" + ch.id, { nodeRefs: ch.nodes || null, lat: ch.lat, lon: ch.lon });
     for (const change of prefill.changes) {
       const card = el("div", null, "obj");
       const lh = el("h3", null);
@@ -1019,12 +1055,18 @@ if (typeof document !== "undefined") {
       const item = { change, current: null, computed: null, conflict: false, error: null, card };
       items.push(item);
       try {
-        const current = await fetchObject(change);
-        item.current = current;
-        if (change.version !== null && change.version !== current.version) {
-          item.conflict = true;
-          log("Version conflict on " + displayName(change.type, change.id, current.tags && current.tags.name) + ": prefill expected v" + change.version + ", live is v" + current.version + ". Click Rebase to refetch and re-apply.", "note");
+        let current;
+        if (change.id < 0) {
+          // New object: no live version to fetch, start from empty state.
+          current = { type: change.type, id: change.id, version: null, timestamp: null, tags: {}, members: [], nodeRefs: null, lat: undefined, lon: undefined };
+        } else {
+          current = await fetchObject(change);
+          if (change.version !== null && change.version !== current.version) {
+            item.conflict = true;
+            log("Version conflict on " + displayName(change.type, change.id, current.tags && current.tags.name) + ": prefill expected v" + change.version + ", live is v" + current.version + ". Click Rebase to refetch and re-apply.", "note");
+          }
         }
+        item.current = current;
         item.computed = applyOps(current, change);
         renderItem(item);
       } catch (e) {
@@ -1040,7 +1082,8 @@ if (typeof document !== "undefined") {
     const c = item.change;
     const title = document.createElement("span");
     title.appendChild(displayNameEl(c.type, c.id, item.current && item.current.tags && item.current.tags.name));
-    if (item.current) title.appendChild(document.createTextNode(" (base revision v" + item.current.version + ")"));
+    if (item.current && item.current.version != null) title.appendChild(document.createTextNode(" (base revision v" + item.current.version + ")"));
+    else if (item.current) title.appendChild(document.createTextNode(" (new object)"));
     if (item.error) {
       const h = el("h3", null);
       h.style.fontSize = "1.25rem";
@@ -1117,8 +1160,26 @@ if (typeof document !== "undefined") {
       if (!res.ok) throw new Error("Changeset create failed (" + res.status + "): " + (await res.text()).slice(0, 300));
       openChangesetId = (await res.text()).trim();
       log("Changeset " + openChangesetId + " created. Uploading " + toUpload.length + " object(s)…");
-      for (const it of toUpload) {
-        const xml = "<osm>" + buildObjectXml(it.change.type, it.change.id, it.current.version, openChangesetId, it.computed, it.computed.lat, it.computed.lon) + "</osm>";
+      // New objects first: the API returns their real ids, and later objects
+      // referencing them by placeholder id get remapped before upload.
+      const creates = toUpload.filter((it) => it.current.version == null);
+      const modifies = toUpload.filter((it) => it.current.version != null);
+      const idMap = new Map();
+      const remapState = (state) => ({
+        ...state,
+        members: (state.members || []).map((m) => idMap.has(m.ref) ? { ...m, ref: idMap.get(m.ref) } : m),
+        nodeRefs: state.nodeRefs ? state.nodeRefs.map((r) => idMap.has(r) ? idMap.get(r) : r) : state.nodeRefs,
+      });
+      for (const it of creates) {
+        const xml = "<osm>" + buildObjectXml(it.change.type, it.change.id, null, openChangesetId, remapState(it.computed), it.computed.lat, it.computed.lon) + "</osm>";
+        res = await fetch(API_BASE + "/" + it.change.type + "/create", { method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: xml });
+        if (!res.ok) throw new Error("Create failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
+        const realId = parseInt((await res.text()).trim(), 10);
+        idMap.set(it.change.id, realId);
+        log("Created " + displayName(it.change.type, it.change.id, it.current.tags && it.current.tags.name) + " -> id " + realId + ".");
+      }
+      for (const it of modifies) {
+        const xml = "<osm>" + buildObjectXml(it.change.type, it.change.id, it.current.version, openChangesetId, remapState(it.computed), it.computed.lat, it.computed.lon) + "</osm>";
         res = await fetch(API_BASE + "/" + it.change.type + "/" + it.change.id, { method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: xml });
         if (!res.ok) throw new Error("Upload failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
         const newVer = (await res.text()).trim();

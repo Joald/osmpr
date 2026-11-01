@@ -163,6 +163,21 @@ assert.ok(!wayXml.includes('ref="22"'));
 const nodeXml = buildObjectXml("node", 900100, 3, "12345", nodeMoved, nodeMoved.lat, nodeMoved.lon);
 assert.match(nodeXml, /lat="51.6" lon="-0.05"/);
 
+// --- new objects: negative placeholder ids ---
+const newWayPre = { type: "way", id: -1, version: null, tags: {}, members: [], lat: undefined, lon: undefined, nodeRefs: null };
+const newWay = applyOps(newWayPre, { add: [], remove: [], tags: {}, lat: null, lon: null, nodes: [111, 222] });
+assert.deepEqual(newWay.nodeRefs, [111, 222]);
+assert.equal(newWay.changed, true);
+const createXml = buildObjectXml("way", -1, null, "12345", newWay, undefined, undefined);
+assert.match(createXml, /^<way changeset="12345"><nd ref="111"\/><nd ref="222"\/><\/way>$/);
+assert.ok(!createXml.includes("version=") && !createXml.includes('id="-1"'));
+const mixedXml = buildOsmChange("12345", [
+  { type: "way", id: -1, version: null, state: newWay, lat: undefined, lon: undefined },
+  { type: "relation", id: 900001, version: 216, state: parentFixed, lat: undefined, lon: undefined },
+]);
+assert.match(mixedXml, /<create>\n    <way changeset="12345">/);
+assert.match(mixedXml, /<modify>\n    <relation id="900001" version="216" changeset="12345">/);
+
 // --- GitHub-style diff lines ---
 const dl = buildDiffLines({ a: "1", b: "old", c: "x" }, [], { a: "1", b: "new", d: "y" }, []);
 assert.equal(dl.tagLines.length, 5); // a same, b del+add, c del, d add

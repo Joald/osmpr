@@ -83,6 +83,11 @@ Rules:
 - Geometry: a node change may set `lat` and `lon` (both, decimal
   degrees); a way change may set `nodes` (array of node ids). Invalid
   geometry is ignored with a warning.
+- New objects: use a negative id (e.g. `-1`) in a change. The object
+  is created on upload (creates go first, then modifies with
+  placeholder references remapped to the real ids). Other changes
+  can reference it by that id — list created objects before the
+  changes that reference them.
 - Upload is disabled when every computed object is unchanged, so
   re-opening an already-applied link cannot re-upload it.
 
