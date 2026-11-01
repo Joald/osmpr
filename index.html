@@ -121,7 +121,7 @@
   </section>
 
 </main>
-<dialog id="helpDialog">
+<dialog id="helpDialog" tabindex="-1">
   <h2 style="margin-top:0">Link format</h2>
   <p>Primary format — one URL parameter <code>d</code> with base64url-encoded JSON (UTF-8). No geometry, no full member lists: only the operations. The page fetches current objects from the OSM API and applies them.</p>
   <pre>{
@@ -582,7 +582,15 @@ if (typeof document !== "undefined") {
     refreshAuthBar();
     $("loginBtn").addEventListener("click", login);
     $("logoutBtn").addEventListener("click", () => { clearTokens(); refreshAuthBar(); log("Logged out. Tokens wiped from this browser."); });
-    $("helpBtn").addEventListener("click", () => $("helpDialog").showModal());
+    $("helpBtn").addEventListener("click", () => {
+      const d = $("helpDialog");
+      d.showModal();
+      // showModal() focuses the first focusable element (the Close button
+      // at the bottom), which scrolls the dialog to the end. Focus the
+      // dialog itself and reset the scroll so it opens at the top.
+      d.scrollTop = 0;
+      d.focus();
+    });
     $("helpCloseBtn").addEventListener("click", () => $("helpDialog").close());
     $("helpDialog").addEventListener("click", (e) => { if (e.target === $("helpDialog")) $("helpDialog").close(); });
     $("rebaseBtn").addEventListener("click", rebase);
