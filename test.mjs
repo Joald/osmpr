@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange, buildDiffLines };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange, buildDiffLines } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -177,6 +177,18 @@ const mixedXml = buildOsmChange("12345", [
 ]);
 assert.match(mixedXml, /<create>\n    <way changeset="12345">/);
 assert.match(mixedXml, /<modify>\n    <relation id="900001" version="216" changeset="12345">/);
+
+// --- object deletes ---
+const delParsed = parsePrefill("?d=" + b64urlEncode(JSON.stringify({ comment: "demo", changes: [{ type: "node", id: 900100, delete: true }] })));
+assert.equal(delParsed.changes[0].delete, true);
+assert.equal(buildDeleteXml("node", 900100, 3, "12345", 51.5, -0.1), '<node id="900100" version="3" changeset="12345" lat="51.5" lon="-0.1"/>');
+assert.equal(buildDeleteXml("way", 900200, 1, "12345", undefined, undefined), '<way id="900200" version="1" changeset="12345"/>');
+const delXml = buildOsmChange("12345", [
+  { type: "node", id: 900100, version: 3, state: {}, lat: 51.5, lon: -0.1, deleted: true },
+  { type: "relation", id: 900001, version: 216, state: parentFixed, lat: undefined, lon: undefined },
+]);
+assert.match(delXml, /<delete>\n    <node id="900100" version="3" changeset="12345" lat="51.5" lon="-0.1"\/>\n  <\/delete>/);
+assert.match(delXml, /<modify>\n    <relation id="900001" version="216"/);
 
 // --- GitHub-style diff lines ---
 const dl = buildDiffLines({ a: "1", b: "old", c: "x" }, [], { a: "1", b: "new", d: "y" }, []);

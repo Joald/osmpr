@@ -162,6 +162,7 @@
     <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
     <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry; Diff shows them in a Geometry section.</li>
     <li>New objects: use a negative id (e.g. <code>-1</code>) in a change. The object is created on upload, and other changes can reference it by that id — list created objects before the changes that reference them.</li>
+    <li>Delete an object: set <code>"delete": true</code> in a change. Upload sends DELETE after creates and modifies; the object must not be used by another object, or the server refuses (412). Other operations in the same change are ignored.</li>
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
@@ -225,6 +226,7 @@ function parsePrefill(search) {
       return {
         type, id: c.id,
         version: Number.isFinite(c.version) ? c.version : null,
+        delete: c.delete === true,
         add: (c.add || []).map((m) => ({ type: normType(m.type), ref: m.id, role: m.role || "" })),
         remove: (c.remove || []).map((m) => ({ type: normType(m.type), ref: m.id, role: m.role || "", roleGiven: m.role !== undefined && m.role !== null })),
         tags: c.tags || {},
@@ -417,10 +419,20 @@ function buildObjectXml(type, id, version, changesetId, state, lat, lon) {
   s += "</" + type + ">";
   return s;
 }
+function buildDeleteXml(type, id, version, changesetId, lat, lon) {
+  // Minimal delete payload per API v0.6: id/version/changeset must match,
+  // nodes additionally require lat/lon (400 without). No tags/members needed.
+  let s = "<" + type + " id=\"" + id + "\" version=\"" + version + "\" changeset=\"" + changesetId + "\"";
+  if (type === "node") s += " lat=\"" + lat + "\" lon=\"" + lon + "\"";
+  s += "/>";
+  return s;
+}
 function buildOsmChange(changesetId, items) {
-  // New objects (version == null) go in <create>, the rest in <modify>.
+  // New objects (version == null) go in <create>, deletes in <delete>,
+  // the rest in <modify>.
   const creates = items.filter((it) => it.version == null);
-  const modifies = items.filter((it) => it.version != null);
+  const modifies = items.filter((it) => it.version != null && !it.deleted);
+  const deletes = items.filter((it) => it.deleted);
   let s = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<osmChange version=\"0.6\" generator=\"osmpr\">\n";
   if (creates.length) {
     s += "  <create>\n";
@@ -431,6 +443,11 @@ function buildOsmChange(changesetId, items) {
     s += "  <modify>\n";
     for (const it of modifies) s += "    " + buildObjectXml(it.type, it.id, it.version, changesetId, it.state, it.lat, it.lon) + "\n";
     s += "  </modify>\n";
+  }
+  if (deletes.length) {
+    s += "  <delete>\n";
+    for (const it of deletes) s += "    " + buildDeleteXml(it.type, it.id, it.version, changesetId, it.lat, it.lon) + "\n";
+    s += "  </delete>\n";
   }
   s += "</osmChange>\n";
   return s;
@@ -1057,6 +1074,7 @@ if (typeof document !== "undefined") {
       try {
         let current;
         if (change.id < 0) {
+          if (change.delete) throw new Error("Cannot delete an object that does not exist yet (negative id).");
           // New object: no live version to fetch, start from empty state.
           current = { type: change.type, id: change.id, version: null, timestamp: null, tags: {}, members: [], nodeRefs: null, lat: undefined, lon: undefined };
         } else {
@@ -1067,7 +1085,16 @@ if (typeof document !== "undefined") {
           }
         }
         item.current = current;
-        item.computed = applyOps(current, change);
+        if (change.delete) {
+          // A delete renders as everything-removed: empty computed state
+          // drives Preview/Diff/Map with all-del lines and old geometry red.
+          item.computed = { deleted: true, changed: true, notes: [], members: [], tags: {}, lat: null, lon: null, nodeRefs: null };
+          if (change.add.length || change.remove.length || Object.keys(change.tags).length || change.lat != null || change.lon != null || change.nodes != null) {
+            item.computed.notes.push({ kind: "note", text: "Other operations are ignored for a delete." });
+          }
+        } else {
+          item.computed = applyOps(current, change);
+        }
         renderItem(item);
       } catch (e) {
         item.error = e.message;
@@ -1096,6 +1123,9 @@ if (typeof document !== "undefined") {
     card.appendChild(header);
     if (item.conflict) {
       card.appendChild(el("p", "⚠ Version conflict: prefill expected v" + c.version + ", live is v" + item.current.version + ". Rebase before uploading.", "note"));
+    }
+    if (item.computed && item.computed.deleted) {
+      card.appendChild(el("p", "This object will be deleted on upload.", "del"));
     }
     const cur = item.current, comp = item.computed;
     const newObj = { type: c.type, id: c.id, tags: comp.tags, members: comp.members, lat: comp.lat, lon: comp.lon, nodeRefs: comp.nodeRefs };
@@ -1144,7 +1174,7 @@ if (typeof document !== "undefined") {
     return items.filter((it) => it.current && it.computed && it.computed.changed && !it.conflict && !it.error);
   }
   function currentOscItems() {
-    return changedItems().map((it) => ({ type: it.change.type, id: it.change.id, version: it.current.version, state: it.computed, lat: it.computed.lat, lon: it.computed.lon }));
+    return changedItems().map((it) => ({ type: it.change.type, id: it.change.id, version: it.current.version, state: it.computed, lat: it.computed.deleted ? it.current.lat : it.computed.lat, lon: it.computed.deleted ? it.current.lon : it.computed.lon, deleted: !!it.computed.deleted }));
   }
   async function upload() {
     const token = await getValidToken();
@@ -1162,8 +1192,11 @@ if (typeof document !== "undefined") {
       log("Changeset " + openChangesetId + " created. Uploading " + toUpload.length + " object(s)…");
       // New objects first: the API returns their real ids, and later objects
       // referencing them by placeholder id get remapped before upload.
+      // Deletes last: an object still referenced by another modified object
+      // cannot be deleted, so modifications go first.
       const creates = toUpload.filter((it) => it.current.version == null);
-      const modifies = toUpload.filter((it) => it.current.version != null);
+      const modifies = toUpload.filter((it) => it.current.version != null && !it.computed.deleted);
+      const deletes = toUpload.filter((it) => it.computed.deleted);
       const idMap = new Map();
       const remapState = (state) => ({
         ...state,
@@ -1184,6 +1217,13 @@ if (typeof document !== "undefined") {
         if (!res.ok) throw new Error("Upload failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
         const newVer = (await res.text()).trim();
         log("Uploaded " + displayName(it.change.type, it.change.id, it.current.tags && it.current.tags.name) + " -> v" + newVer + ".");
+      }
+      for (const it of deletes) {
+        const xml = "<osm>" + buildDeleteXml(it.change.type, it.change.id, it.current.version, openChangesetId, it.current.lat, it.current.lon) + "</osm>";
+        res = await fetch(API_BASE + "/" + it.change.type + "/" + it.change.id, { method: "DELETE", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: xml });
+        if (!res.ok) throw new Error("Delete failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
+        const newVer = (await res.text()).trim();
+        log("Deleted " + displayName(it.change.type, it.change.id, it.current.tags && it.current.tags.name) + " -> v" + newVer + ".");
       }
       res = await fetch(API_BASE + "/changeset/" + openChangesetId + "/close", { method: "PUT", headers: { Authorization: "Bearer " + token } });
       if (!res.ok) throw new Error("Changeset close failed (" + res.status + "): " + (await res.text()).slice(0, 300));

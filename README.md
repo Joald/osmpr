@@ -88,6 +88,10 @@ Rules:
   placeholder references remapped to the real ids). Other changes
   can reference it by that id — list created objects before the
   changes that reference them.
+- Delete an object: set `"delete": true` in a change. Upload sends
+  DELETE after creates and modifies. The object must not be used by
+  another object, or the server refuses (412). Other operations in
+  the same change are ignored.
 - Upload is disabled when every computed object is unchanged, so
   re-opening an already-applied link cannot re-upload it.
 
