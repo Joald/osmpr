@@ -81,6 +81,11 @@
   .switch button { border-radius: 0; }
   .switch button:first-child { border-top-left-radius: 8px; border-bottom-left-radius: 8px; }
   .switch button:last-child { border-top-right-radius: 8px; border-bottom-right-radius: 8px; }
+  .section-head { border-top: 1px solid #2a2e33; padding-top: 10px; margin-top: 14px; }
+  .section-head h3 { font-size: 0.95rem; }
+  .chev-btn { padding: 6px 10px; }
+  .chev { display: inline-block; width: 8px; height: 8px; border-right: 2px solid #e8e8e8; border-bottom: 2px solid #e8e8e8; transform: rotate(45deg); margin-bottom: 1px; }
+  .chev.right { transform: rotate(-45deg); }
   a { color: #7fb3e8; }
 </style>
 </head>
@@ -394,7 +399,6 @@ if (typeof document !== "undefined") {
     div.hidden = true;
     const keys = [...new Set([...Object.keys(oldTags), ...Object.keys(newTags)])].sort();
     if (keys.length) {
-      div.appendChild(el("h3", "Tags:"));
       const ul = el("ul", null, "diff");
       for (const k of keys) {
         const li = document.createElement("li");
@@ -419,12 +423,11 @@ if (typeof document !== "undefined") {
         }
         ul.appendChild(li);
       }
-      div.appendChild(ul);
+      div.appendChild(section("Tags:", [ul]));
     }
     if (isRelation) {
       const d = diffMembers(oldMembers, newMembers);
       if (newMembers.length || d.removed.length) {
-        div.appendChild(el("h3", "Members:"));
         const ul = el("ul", null, "diff");
         const addedKeys = new Set(d.added.map(memberKey));
         for (const m of newMembers) {
@@ -432,7 +435,7 @@ if (typeof document !== "undefined") {
           ul.appendChild(memberLi(isAdded ? "+" : "", m, isAdded ? "add" : null));
         }
         for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
-        div.appendChild(ul);
+        div.appendChild(section("Members:", [ul]));
       }
     }
     if (!div.hasChildNodes()) div.appendChild(el("p", "Empty object", "muted"));
@@ -469,11 +472,37 @@ if (typeof document !== "undefined") {
     btns.diff.addEventListener("click", () => show("diff"));
     btns.raw.addEventListener("click", () => show("raw"));
   }
+  function section(title, children) {
+    // Collapsible section: separator above, chevron toggle on the right.
+    const wrap = document.createElement("div");
+    const head = el("div", null, "row section-head");
+    const t = el("h3", title);
+    t.style.flex = "1";
+    t.style.margin = "0";
+    head.appendChild(t);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary chev-btn";
+    const ch = document.createElement("span");
+    ch.className = "chev";
+    btn.appendChild(ch);
+    const body = document.createElement("div");
+    for (const c of children) body.appendChild(c);
+    btn.addEventListener("click", () => {
+      body.hidden = !body.hidden;
+      ch.classList.toggle("right", body.hidden);
+    });
+    head.appendChild(btn);
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+    return wrap;
+  }
   function cardHeaderWithSwitch(titleNode) {
     const header = el("div", null, "row");
     const h = el("h3", null);
     h.style.flex = "1";
     h.style.margin = "0";
+    h.style.fontSize = "1.25rem";
     h.appendChild(titleNode);
     header.appendChild(h);
     const sw = makeSwitch();
@@ -644,6 +673,7 @@ if (typeof document !== "undefined") {
     for (const change of prefill.changes) {
       const card = el("div", null, "obj");
       const lh = el("h3", null);
+      lh.style.fontSize = "1.25rem";
       lh.appendChild(displayNameEl(change.type, change.id, null));
       card.appendChild(lh);
       card.appendChild(el("p", "Loading current version from OSM…", "muted"));
@@ -675,6 +705,7 @@ if (typeof document !== "undefined") {
     if (item.current) title.appendChild(document.createTextNode(" (base revision v" + item.current.version + ")"));
     if (item.error) {
       const h = el("h3", null);
+      h.style.fontSize = "1.25rem";
       h.appendChild(title);
       card.appendChild(h);
       card.appendChild(el("p", "Error: " + item.error, "del"));
@@ -690,29 +721,29 @@ if (typeof document !== "undefined") {
     if (c.type === "relation") {
       const d = diffMembers(cur.members, comp.members);
       if (d.added.length || d.removed.length) {
-        previewView.appendChild(el("h3", "Members: " + cur.members.length + " -> " + comp.members.length));
+        const content = [];
         if (d.added.length) {
-          previewView.appendChild(el("p", "Added:", "add"));
+          content.push(el("p", "Added:", "add"));
           const ul = el("ul", null, "diff");
           for (const m of d.added) ul.appendChild(memberLi("+", m, "add"));
-          previewView.appendChild(ul);
+          content.push(ul);
         }
         if (d.removed.length) {
-          previewView.appendChild(el("p", "Removed:", "del"));
+          content.push(el("p", "Removed:", "del"));
           const ul = el("ul", null, "diff");
           for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
-          previewView.appendChild(ul);
+          content.push(ul);
         }
+        previewView.appendChild(section("Members: " + cur.members.length + " -> " + comp.members.length, content));
       }
     }
     const td = diffTags(cur.tags, comp.tags);
     if (td.length) {
-      previewView.appendChild(el("h3", "Tags changed:"));
       const ul = el("ul", null, "diff");
       for (const t of td) {
         ul.appendChild(el("li", t.key + ": " + (t.from === null ? "(new)" : JSON.stringify(t.from)) + " -> " + (t.to === null ? "(deleted)" : JSON.stringify(t.to))));
       }
-      previewView.appendChild(ul);
+      previewView.appendChild(section("Tags changed:", [ul]));
     }
     if (!comp.changed && !item.conflict) previewView.appendChild(el("p", "The proposed changes will not modify this object.", "muted"));
     for (const n of comp.notes) previewView.appendChild(el("p", (n.kind === "warn" ? "⚠ " : "• ") + n.text, n.kind === "warn" ? "note" : "muted"));
@@ -826,29 +857,29 @@ if (typeof document !== "undefined") {
     if (obj.type === "relation") {
       const d = diffMembers(oldMembers, newMembers);
       if (d.added.length || d.removed.length) {
-        previewView.appendChild(el("h3", "Members: " + oldMembers.length + " -> " + newMembers.length));
+        const content = [];
         if (d.added.length) {
-          previewView.appendChild(el("p", "Added:", "add"));
+          content.push(el("p", "Added:", "add"));
           const ul = el("ul", null, "diff");
           for (const m of d.added) ul.appendChild(memberLi("+", m, "add"));
-          previewView.appendChild(ul);
+          content.push(ul);
         }
         if (d.removed.length) {
-          previewView.appendChild(el("p", "Removed:", "del"));
+          content.push(el("p", "Removed:", "del"));
           const ul = el("ul", null, "diff");
           for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
-          previewView.appendChild(ul);
+          content.push(ul);
         }
+        previewView.appendChild(section("Members: " + oldMembers.length + " -> " + newMembers.length, content));
       }
     }
     const td = diffTags(oldTags, newTags);
     if (td.length) {
-      previewView.appendChild(el("h3", "Tags changed:"));
       const ul = el("ul", null, "diff");
       for (const t of td) {
         ul.appendChild(el("li", t.key + ": " + (t.from === null ? "(new)" : JSON.stringify(t.from)) + " -> " + (t.to === null ? "(deleted)" : JSON.stringify(t.to))));
       }
-      previewView.appendChild(ul);
+      previewView.appendChild(section("Tags changed:", [ul]));
     }
     const md = obj.type === "relation" ? diffMembers(oldMembers, newMembers) : null;
     if (!td.length && (!md || (!md.added.length && !md.removed.length))) previewView.appendChild(el("p", "No differences", "muted"));

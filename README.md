@@ -94,7 +94,8 @@ present, `d` wins.
 - Preview shows added members (green) and removed members (red);
   unchanged members are omitted. Each object card has a
   Preview / Diff / Raw switch: Diff shows the whole object with a
-  character-level diff, Raw shows the change JSON.
+  character-level diff, Raw shows the change JSON. Sections
+  (Tags, Members) have a separator and a chevron to collapse them.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before
