@@ -92,8 +92,8 @@ present, `d` wins.
 ## Safety features
 
 - Preview shows added members (green) and removed members (red);
-  unchanged members are omitted. Per-card **Diff** shows a
-  character-level diff, **Raw** shows the change JSON.
+  unchanged members are omitted. Per-card **Diff** shows the whole
+  object with a character-level diff, **Raw** shows the change JSON.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before

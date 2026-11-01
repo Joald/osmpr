@@ -361,7 +361,8 @@ if (typeof document !== "undefined") {
   }
   function memberLi(prefix, m, cls) {
     const li = el("li", null, cls);
-    li.appendChild(document.createTextNode(prefix + " " + m.type + " "));
+    li.appendChild(document.createTextNode(prefix ? prefix + " " : ""));
+    li.appendChild(document.createTextNode(m.type + " "));
     li.appendChild(osmLink(m.type, m.ref));
     li.appendChild(document.createTextNode(" (" + (m.role || "no role") + ")"));
     return li;
@@ -384,26 +385,33 @@ if (typeof document !== "undefined") {
     return frag;
   }
   function buildDiffPanel(oldTags, oldMembers, newTags, newMembers, isRelation) {
+    // Full new object: every tag and every member, changes highlighted.
     const div = document.createElement("div");
     div.hidden = true;
-    const td = diffTags(oldTags, newTags);
-    if (td.length) {
+    const keys = [...new Set([...Object.keys(oldTags), ...Object.keys(newTags)])].sort();
+    if (keys.length) {
       div.appendChild(el("h3", "Tags:"));
       const ul = el("ul", null, "diff");
-      for (const t of td) {
+      for (const k of keys) {
         const li = document.createElement("li");
-        li.appendChild(document.createTextNode(t.key + ": "));
-        if (t.from === null) {
-          li.appendChild(document.createTextNode("(new) "));
-          li.appendChild(charDiffSpans([{ t: "ins", s: t.to }], "new"));
-        } else if (t.to === null) {
-          li.appendChild(charDiffSpans([{ t: "del", s: t.from }], "old"));
+        li.appendChild(document.createTextNode(k + ": "));
+        if (!(k in newTags)) {
+          const s = document.createElement("span");
+          s.className = "del"; s.style.textDecoration = "line-through"; s.textContent = oldTags[k];
+          li.appendChild(s);
           li.appendChild(document.createTextNode(" (deleted)"));
-        } else {
-          const ops = diffChars(t.from, t.to);
+        } else if (!(k in oldTags)) {
+          li.appendChild(document.createTextNode("(new) "));
+          const s = document.createElement("span");
+          s.className = "add"; s.textContent = newTags[k];
+          li.appendChild(s);
+        } else if (oldTags[k] !== newTags[k]) {
+          const ops = diffChars(oldTags[k], newTags[k]);
           li.appendChild(charDiffSpans(ops, "old"));
           li.appendChild(document.createTextNode(" -> "));
           li.appendChild(charDiffSpans(ops, "new"));
+        } else {
+          li.appendChild(document.createTextNode(newTags[k]));
         }
         ul.appendChild(li);
       }
@@ -411,15 +419,19 @@ if (typeof document !== "undefined") {
     }
     if (isRelation) {
       const d = diffMembers(oldMembers, newMembers);
-      if (d.added.length || d.removed.length) {
+      if (newMembers.length || d.removed.length) {
         div.appendChild(el("h3", "Members:"));
         const ul = el("ul", null, "diff");
-        for (const m of d.added) ul.appendChild(memberLi("+", m, "add"));
+        const addedKeys = new Set(d.added.map(memberKey));
+        for (const m of newMembers) {
+          const isAdded = addedKeys.has(memberKey(m));
+          ul.appendChild(memberLi(isAdded ? "+" : "", m, isAdded ? "add" : null));
+        }
         for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
         div.appendChild(ul);
       }
     }
-    if (!div.hasChildNodes()) div.appendChild(el("p", "No differences", "muted"));
+    if (!div.hasChildNodes()) div.appendChild(el("p", "Empty object", "muted"));
     return div;
   }
   function buildRawPanel(jsonObj) {
