@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange, projectCoord, fitMapBounds };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange, projectCoord, fitMapBounds } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange, buildDiffLines };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange, buildDiffLines } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -163,16 +163,19 @@ assert.ok(!wayXml.includes('ref="22"'));
 const nodeXml = buildObjectXml("node", 900100, 3, "12345", nodeMoved, nodeMoved.lat, nodeMoved.lon);
 assert.match(nodeXml, /lat="51.6" lon="-0.05"/);
 
-// --- map geometry math ---
-assert.deepEqual(projectCoord(51.5, 0, 51.5, 0), { x: 0, y: 0 });
-const pc = projectCoord(51.6, 0.1, 51.5, 0);
-assert.ok(pc.y < 0 && pc.x > 0, "north/east of center");
-assert.equal(fitMapBounds([]), null);
-const single = fitMapBounds([{ x: 1, y: 2 }]);
-assert.ok(single.w > 0 && single.h > 0 && single.minX < 1 && single.minY < 2);
-const box = fitMapBounds([{ x: 0, y: 0 }, { x: 10, y: 5 }]);
-assert.equal(box.w, 10 * 1.16);
-assert.equal(box.h, 5 * 1.16);
-assert.equal(box.minX, -10 * 0.08);
+// --- GitHub-style diff lines ---
+const dl = buildDiffLines({ a: "1", b: "old", c: "x" }, [], { a: "1", b: "new", d: "y" }, []);
+assert.equal(dl.tagLines.length, 5); // a same, b del+add, c del, d add
+assert.deepEqual(dl.tagLines[0], { kind: "same", oldNo: 1, newNo: 1, key: "a", value: "1" });
+assert.equal(dl.tagLines[1].kind, "del"); assert.equal(dl.tagLines[1].oldNo, 2); assert.equal(dl.tagLines[1].newNo, "");
+assert.equal(dl.tagLines[2].kind, "add"); assert.equal(dl.tagLines[2].newNo, 2);
+assert.equal(dl.tagLines[3].kind, "del"); assert.equal(dl.tagLines[3].key, "c");
+assert.equal(dl.tagLines[4].kind, "add"); assert.equal(dl.tagLines[4].key, "d");
+assert.ok(dl.tagLines[1].ops && dl.tagLines[2].ops, "changed tag keeps char-level ops");
+const ml = buildDiffLines({}, [member("way", 1, "outer"), member("way", 2, "outer")], {}, [member("way", 1, "outer"), member("way", 3, "outer")]);
+assert.equal(ml.memberLines.length, 3);
+assert.equal(ml.memberLines[0].kind, "same"); assert.equal(ml.memberLines[0].oldNo, 1); assert.equal(ml.memberLines[0].newNo, 1);
+assert.equal(ml.memberLines[1].kind, "add"); assert.equal(ml.memberLines[1].newNo, 2);
+assert.equal(ml.memberLines[2].kind, "del"); assert.equal(ml.memberLines[2].oldNo, 2);
 
 console.log("All editor logic tests passed.");

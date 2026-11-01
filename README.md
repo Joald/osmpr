@@ -12,10 +12,12 @@ shareable link: open the link, review the diff, click Upload.
    (see [Link format](#link-format)).
 2. You open it. The page fetches the current objects from the OSM API
    (public read), applies the encoded operations, and shows a diff
-   preview: added members, removed members, tag changes. Each object
-   card has a Preview / Diff / Raw / Map switch: Diff shows the whole
-   object with a character-level diff, Raw shows the change JSON, Map
-   draws the object and highlights geometry changes.
+   preview: added members, removed members, tag changes. Each prefill
+   object card has a Preview / Diff / Raw / Map switch: Diff shows a
+   GitHub-style unified diff, Raw shows the change JSON, Map draws the
+   object on OpenStreetMap tiles and highlights geometry changes.
+   Changeset cards have Preview / Diff / Map (no Raw: there is no
+   custom-format change object to show, only the before/after states).
 3. You click **Upload**. The page creates one changeset, uploads every
    changed object, and closes the changeset. A toast confirms the
    upload, and the page switches to the new changeset's view.
@@ -33,9 +35,11 @@ click Upload.
   device, and the page refreshes an expired access token automatically
   before uploading.
 - Tokens are never sent anywhere except `openstreetmap.org` itself
-  (the OAuth token endpoint and the API). They are never in a URL,
-  never in the repository, and no third-party script ever runs on the
-  page (the whole editor is this one audited file).
+  (the OAuth token endpoint and the API). They are never in a URL
+  and never in the repository. The editor itself is this one audited
+  file; the Map view additionally loads Leaflet (JS + CSS) from CDN
+  and map tiles from `tile.openstreetmap.org`, only the first time
+  Map is opened — neither receives any token.
 - **Log out** on the page wipes both tokens. You can also revoke
   access anytime from OSM My Settings → Authorized applications.
 - Limitation: login needs the **https** hosted URL. Opening the file
@@ -96,11 +100,12 @@ present, `d` wins.
 
 - Preview shows added members (green) and removed members (red);
   unchanged members are omitted. Each object card has a
-  Preview / Diff / Raw / Map switch: Diff shows the whole object with a
-  character-level diff, Raw shows the change JSON, Map draws the object
-  (hand-rolled SVG, no third-party scripts) and highlights old vs new
-  geometry. Sections (Tags, Members) have a separator and a chevron to
-  collapse them.
+  Preview / Diff / Map switch (prefill cards also have Raw): Diff is a
+  GitHub-style unified diff with line numbers, whole changed lines
+  tinted, and unchanged lines collapsed by default. Map draws the
+  object on OpenStreetMap tiles (Leaflet, loaded from CDN on first
+  use) and highlights old vs new geometry. Sections (Tags, Members)
+  have a separator and a chevron to collapse them.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before

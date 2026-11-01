@@ -87,6 +87,13 @@
   .chev-btn { padding: 6px 10px; }
   .chev { display: inline-block; width: 8px; height: 8px; border-right: 2px solid #e8e8e8; border-bottom: 2px solid #e8e8e8; transform: rotate(45deg); margin-bottom: 1px; }
   .chev.right { transform: rotate(-45deg); }
+  .diff-table { border-collapse: collapse; width: 100%; }
+  .diff-table td { padding: 2px 6px; vertical-align: top; }
+  .diff-ln { text-align: right; color: #6b7280; width: 1%; white-space: nowrap; user-select: none; }
+  .diff-code { white-space: pre-wrap; word-break: break-word; }
+  .diff-add { background: rgba(126, 231, 135, 0.12); }
+  .diff-del { background: rgba(255, 123, 114, 0.12); }
+  tr.diff-expand td { text-align: center; padding: 6px; }
   a { color: #7fb3e8; }
 </style>
 </head>
@@ -131,7 +138,7 @@
 <div id="toast" class="panel" hidden></div>
 <dialog id="helpDialog" tabindex="-1">
   <h2 style="margin-top:0">Link format</h2>
-  <p>Primary format — one URL parameter <code>d</code> with base64url-encoded JSON (UTF-8). No geometry, no full member lists: only the operations. The page fetches current objects from the OSM API and applies them.</p>
+  <p>Primary format — one URL parameter <code>d</code> with base64url-encoded JSON (UTF-8). No full geometry, no full member lists: only the operations. The page fetches current objects from the OSM API and applies them.</p>
   <pre>{
   "comment": "Changeset comment",
   "changes": [
@@ -149,6 +156,7 @@
     <li><code>remove</code> without a <code>role</code> matches any role for that type + id. <code>tags</code> value <code>null</code> deletes the tag.</li>
     <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
     <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry.</li>
+    <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
   </ul>
@@ -326,6 +334,37 @@ function diffChars(a, b) {
   while (j < m) { push("ins", b[j]); j++; }
   return ops;
 }
+function buildDiffLines(oldTags, oldMembers, newTags, newMembers) {
+  // GitHub-style unified diff lines. Tag line: {kind, oldNo, newNo, key, value?/ops?/side?}.
+  // Member line: {kind, oldNo, newNo, member}. Changed tags become a -/+ line pair.
+  const tagLines = [];
+  const oldKeys = Object.keys(oldTags).sort(), newKeys = Object.keys(newTags).sort();
+  const oldIdx = new Map(oldKeys.map((k, i) => [k, i + 1]));
+  const newIdx = new Map(newKeys.map((k, i) => [k, i + 1]));
+  const allKeys = [...new Set([...oldKeys, ...newKeys])].sort();
+  for (const k of allKeys) {
+    if (!(k in newTags)) tagLines.push({ kind: "del", oldNo: oldIdx.get(k), newNo: "", key: k, value: oldTags[k] });
+    else if (!(k in oldTags)) tagLines.push({ kind: "add", oldNo: "", newNo: newIdx.get(k), key: k, value: newTags[k] });
+    else if (oldTags[k] !== newTags[k]) {
+      const ops = diffChars(oldTags[k], newTags[k]);
+      tagLines.push({ kind: "del", oldNo: oldIdx.get(k), newNo: "", key: k, ops, side: "old" });
+      tagLines.push({ kind: "add", oldNo: "", newNo: newIdx.get(k), key: k, ops, side: "new" });
+    } else tagLines.push({ kind: "same", oldNo: oldIdx.get(k), newNo: newIdx.get(k), key: k, value: newTags[k] });
+  }
+  const memberLines = [];
+  const oldMIdx = new Map((oldMembers || []).map((m, i) => [memberKey(m), i + 1]));
+  const newMIdx = new Map((newMembers || []).map((m, i) => [memberKey(m), i + 1]));
+  for (const m of newMembers || []) {
+    const k = memberKey(m);
+    if (oldMIdx.has(k)) memberLines.push({ kind: "same", oldNo: oldMIdx.get(k), newNo: newMIdx.get(k), member: m });
+    else memberLines.push({ kind: "add", oldNo: "", newNo: newMIdx.get(k), member: m });
+  }
+  for (const m of oldMembers || []) {
+    const k = memberKey(m);
+    if (!newMIdx.has(k)) memberLines.push({ kind: "del", oldNo: oldMIdx.get(k), newNo: "", member: m });
+  }
+  return { tagLines, memberLines };
+}
 function buildObjectXml(type, id, version, changesetId, state, lat, lon) {
   let s = "<" + type + " id=\"" + id + "\" version=\"" + version + "\" changeset=\"" + changesetId + "\"";
   if (type === "node") s += " lat=\"" + lat + "\" lon=\"" + lon + "\"";
@@ -350,24 +389,6 @@ function buildOsmChange(changesetId, items) {
   return s;
 }
 
-/* Map geometry math (pure, tested under node) */
-function projectCoord(lat, lon, lat0, lon0) {
-  // Equirectangular projection around (lat0, lon0); y grows southward.
-  const kx = Math.cos(lat0 * Math.PI / 180);
-  return { x: (lon - lon0) * kx, y: (lat0 - lat) };
-}
-function fitMapBounds(pts) {
-  // pts: [{x, y}] in projected units. Returns padded {minX, minY, w, h}, or null when empty.
-  if (!pts.length) return null;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of pts) { if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y; if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y; }
-  let w = maxX - minX, h = maxY - minY;
-  if (w === 0 && h === 0) { w = 0.004; h = 0.004; } // single point: ~400 m window
-  else if (w === 0) w = h * 0.1 || 0.004;
-  else if (h === 0) h = w * 0.1 || 0.004;
-  const pad = 0.08;
-  return { minX: minX - w * pad, minY: minY - h * pad, w: w * (1 + 2 * pad), h: h * (1 + 2 * pad) };
-}
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -450,50 +471,77 @@ if (typeof document !== "undefined") {
     return frag;
   }
   function buildDiffPanel(oldTags, oldMembers, newTags, newMembers, isRelation) {
-    // Full new object: every tag and every member, changes highlighted.
+    // GitHub-style unified diff: line numbers, whole changed lines tinted,
+    // unchanged runs collapsed by default behind an expander.
     const div = document.createElement("div");
     div.hidden = true;
-    const keys = [...new Set([...Object.keys(oldTags), ...Object.keys(newTags)])].sort();
-    if (keys.length) {
-      const ul = el("ul", null, "diff");
-      for (const k of keys) {
-        const li = document.createElement("li");
-        li.appendChild(document.createTextNode(k + ": "));
-        if (!(k in newTags)) {
-          const s = document.createElement("span");
-          s.className = "del"; s.style.textDecoration = "line-through"; s.textContent = oldTags[k];
-          li.appendChild(s);
-          li.appendChild(document.createTextNode(" (deleted)"));
-        } else if (!(k in oldTags)) {
-          li.appendChild(document.createTextNode("(new) "));
-          const s = document.createElement("span");
-          s.className = "add"; s.textContent = newTags[k];
-          li.appendChild(s);
-        } else if (oldTags[k] !== newTags[k]) {
-          const ops = diffChars(oldTags[k], newTags[k]);
-          li.appendChild(charDiffSpans(ops, "old"));
-          li.appendChild(document.createTextNode(" -> "));
-          li.appendChild(charDiffSpans(ops, "new"));
+    const { tagLines, memberLines } = buildDiffLines(oldTags, oldMembers, newTags, newMembers);
+    const lineRow = (ln, contentFn) => {
+      const tr = document.createElement("tr");
+      if (ln.kind === "add") tr.className = "diff-add";
+      else if (ln.kind === "del") tr.className = "diff-del";
+      const tdOld = document.createElement("td");
+      tdOld.className = "diff-ln"; tdOld.textContent = ln.oldNo === "" ? "" : ln.oldNo;
+      const tdNew = document.createElement("td");
+      tdNew.className = "diff-ln"; tdNew.textContent = ln.newNo === "" ? "" : ln.newNo;
+      const tdCode = document.createElement("td");
+      tdCode.className = "diff-code";
+      contentFn(ln, tdCode);
+      tr.append(tdOld, tdNew, tdCode);
+      return tr;
+    };
+    const renderLines = (lines, contentFn) => {
+      const table = document.createElement("table");
+      table.className = "diff-table";
+      let i = 0;
+      while (i < lines.length) {
+        if (lines[i].kind === "same") {
+          let j = i;
+          while (j < lines.length && lines[j].kind === "same") j++;
+          const run = lines.slice(i, j);
+          const expBody = document.createElement("tbody");
+          const expRow = document.createElement("tr");
+          expRow.className = "diff-expand";
+          const td = document.createElement("td");
+          td.colSpan = 3;
+          const btn = document.createElement("button");
+          btn.type = "button"; btn.className = "secondary chev-btn";
+          const ch = document.createElement("span"); ch.className = "chev right";
+          btn.appendChild(ch);
+          btn.appendChild(document.createTextNode(" " + run.length + (run.length === 1 ? " unchanged line" : " unchanged lines")));
+          const runBody = document.createElement("tbody");
+          runBody.hidden = true;
+          for (const ln of run) runBody.appendChild(lineRow(ln, contentFn));
+          btn.addEventListener("click", () => { runBody.hidden = !runBody.hidden; ch.classList.toggle("right", runBody.hidden); });
+          td.appendChild(btn);
+          expRow.appendChild(td);
+          expBody.appendChild(expRow);
+          table.appendChild(expBody);
+          table.appendChild(runBody);
+          i = j;
         } else {
-          li.appendChild(document.createTextNode(newTags[k]));
+          const tb = document.createElement("tbody");
+          tb.appendChild(lineRow(lines[i], contentFn));
+          table.appendChild(tb);
+          i++;
         }
-        ul.appendChild(li);
       }
-      div.appendChild(section("Tags:", [ul]));
-    }
-    if (isRelation) {
-      const d = diffMembers(oldMembers, newMembers);
-      if (newMembers.length || d.removed.length) {
-        const ul = el("ul", null, "diff");
-        const addedKeys = new Set(d.added.map(memberKey));
-        for (const m of newMembers) {
-          const isAdded = addedKeys.has(memberKey(m));
-          ul.appendChild(memberLi(isAdded ? "+" : "", m, isAdded ? "add" : null));
-        }
-        for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
-        div.appendChild(section("Members:", [ul]));
-      }
-    }
+      return table;
+    };
+    const tagContent = (ln, td) => {
+      td.appendChild(document.createTextNode(ln.kind === "add" ? "+ " : ln.kind === "del" ? "- " : "  "));
+      td.appendChild(document.createTextNode(ln.key + ": "));
+      if (ln.ops) td.appendChild(charDiffSpans(ln.ops, ln.side));
+      else td.appendChild(document.createTextNode(ln.value));
+    };
+    const memberContent = (ln, td) => {
+      td.appendChild(document.createTextNode(ln.kind === "add" ? "+ " : ln.kind === "del" ? "- " : "  "));
+      td.appendChild(document.createTextNode(ln.member.type + " "));
+      td.appendChild(osmLink(ln.member.type, ln.member.ref));
+      td.appendChild(document.createTextNode(" (" + (ln.member.role || "no role") + ")"));
+    };
+    if (tagLines.length) div.appendChild(section("Tags:", [renderLines(tagLines, tagContent)]));
+    if (isRelation && memberLines.length) div.appendChild(section("Members:", [renderLines(memberLines, memberContent)]));
     if (!div.hasChildNodes()) div.appendChild(el("p", "Empty object", "muted"));
     return div;
   }
@@ -505,7 +553,7 @@ if (typeof document !== "undefined") {
     div.appendChild(pre);
     return div;
   }
-  // ---- Map view: hand-rolled SVG, no third-party scripts ----
+  // ---- Map view: OSM tiles via Leaflet (loaded from CDN on first use) ----
   const MAP_COLORS = { unchanged: "#8a8f98", added: "#7ee787", removed: "#ff7b72", old: "#ff7b72", new: "#7ee787", connector: "#8a8f98" };
   async function fetchNodeCoords(ids) {
     const out = new Map();
@@ -532,18 +580,13 @@ if (typeof document !== "undefined") {
     }
     return { members, wayNodes, nodeCoords };
   }
-  function svgEl(tag, attrs) {
-    const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
-    return n;
-  }
-  async function renderMapSvg(oldObj, newObj) {
+  async function collectMapDrawables(oldObj, newObj) {
     // Drawables: {kind, pts: [{lat, lon}]}. kind: unchanged | added | removed | old | new | connector.
     const drawables = [];
     const type = oldObj.type;
     if (type === "node") {
       const oOk = oldObj.lat != null && oldObj.lon != null, nOk = newObj.lat != null && newObj.lon != null;
-      if (!oOk && !nOk) return null;
+      if (!oOk && !nOk) return [];
       if (oOk && nOk && (oldObj.lat !== newObj.lat || oldObj.lon !== newObj.lon)) {
         const o = { lat: oldObj.lat, lon: oldObj.lon }, n = { lat: newObj.lat, lon: newObj.lon };
         drawables.push({ kind: "old", pts: [o] });
@@ -592,29 +635,25 @@ if (typeof document !== "undefined") {
       for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m))) pushMember(m, "removed");
       for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m))) pushMember(m, "added");
     }
-    if (!drawables.length) return null;
-    const allPts = drawables.flatMap((d) => d.pts);
-    const lat0 = allPts.reduce((s, p) => s + p.lat, 0) / allPts.length;
-    const lon0 = allPts.reduce((s, p) => s + p.lon, 0) / allPts.length;
-    const proj = drawables.map((d) => ({ kind: d.kind, xy: d.pts.map((p) => projectCoord(p.lat, p.lon, lat0, lon0)) }));
-    const bounds = fitMapBounds(proj.flatMap((d) => d.xy));
-    const svg = svgEl("svg", { viewBox: bounds.minX + " " + bounds.minY + " " + bounds.w + " " + bounds.h, style: "width:100%;height:auto;display:block;aspect-ratio:" + Math.max(0.5, Math.min(2.5, bounds.w / bounds.h)) });
-    const sw = bounds.w * 0.004, r = bounds.w * 0.008;
-    for (const d of proj) {
-      const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
-      const ptsAttr = d.xy.map((p) => p.x + "," + p.y).join(" ");
-      if (d.xy.length === 1) {
-        svg.appendChild(svgEl("circle", { cx: d.xy[0].x, cy: d.xy[0].y, r, fill: color }));
-      } else if (d.kind === "connector") {
-        svg.appendChild(svgEl("line", { x1: d.xy[0].x, y1: d.xy[0].y, x2: d.xy[1].x, y2: d.xy[1].y, stroke: color, "stroke-width": sw, "stroke-dasharray": (bounds.w * 0.02) + " " + (bounds.w * 0.012) }));
-      } else {
-        const first = d.xy[0], last = d.xy[d.xy.length - 1];
-        const closed = first.x === last.x && first.y === last.y;
-        if (closed) svg.appendChild(svgEl("polygon", { points: ptsAttr, fill: color, "fill-opacity": 0.15, stroke: color, "stroke-width": sw, "stroke-linejoin": "round" }));
-        else svg.appendChild(svgEl("polyline", { points: ptsAttr, fill: "none", stroke: color, "stroke-width": sw, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-      }
-    }
-    return svg;
+    if (!drawables.length) return [];
+    return drawables;
+  }
+  let leafletPromise = null;
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    if (leafletPromise) return leafletPromise;
+    leafletPromise = new Promise((resolve, reject) => {
+      const link = document.createElement("link");
+      link.rel = "stylesheet"; link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      document.head.appendChild(link);
+      const script = document.createElement("script");
+      script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Leaflet failed to load from CDN"));
+      document.head.appendChild(script);
+    });
+    leafletPromise.catch(() => { leafletPromise = null; });
+    return leafletPromise;
   }
   function buildMapView(oldObj, newObj) {
     const div = document.createElement("div");
@@ -625,12 +664,32 @@ if (typeof document !== "undefined") {
       if (loaded) return;
       loaded = true;
       try {
-        const svg = await renderMapSvg(oldObj, newObj);
+        const drawables = await collectMapDrawables(oldObj, newObj);
         div.innerHTML = "";
-        if (svg) {
-          div.appendChild(svg);
-          div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
-        } else div.appendChild(el("p", "No drawable geometry for this object.", "muted"));
+        if (!drawables.length) { div.appendChild(el("p", "No drawable geometry for this object.", "muted")); return; }
+        const mapDiv = document.createElement("div");
+        mapDiv.style.height = "420px";
+        div.appendChild(mapDiv);
+        await loadLeaflet();
+        const map = L.map(mapDiv);
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
+        const bounds = [];
+        for (const d of drawables) {
+          const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
+          const latlngs = d.pts.map((p) => [p.lat, p.lon]);
+          bounds.push(...latlngs);
+          if (latlngs.length === 1) L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map);
+          else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(map);
+          else {
+            const first = d.pts[0], last = d.pts[d.pts.length - 1];
+            const closed = first.lat === last.lat && first.lon === last.lon;
+            if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(map);
+            else L.polyline(latlngs, { color, weight: 3 }).addTo(map);
+          }
+        }
+        map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+        map.invalidateSize();
+        div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
       } catch (e) {
         div.innerHTML = "";
         div.appendChild(el("p", "Map failed to load: " + e.message, "del"));
@@ -638,11 +697,11 @@ if (typeof document !== "undefined") {
     };
     return div;
   }
-  function makeSwitch() {
-    // Segmented Preview / Diff / Raw / Map control; caller wires the views.
+  function makeSwitch(names) {
+    // Segmented view control; caller wires the views.
     const wrap = el("div", null, "switch");
     const btns = {};
-    for (const name of ["Preview", "Diff", "Raw", "Map"]) {
+    for (const name of names) {
       const b = el("button", name, name === "Preview" ? "" : "secondary");
       b.type = "button";
       wrap.appendChild(b);
@@ -652,16 +711,13 @@ if (typeof document !== "undefined") {
   }
   function wireSwitch(btns, views) {
     const show = (which) => {
-      for (const k of ["preview", "diff", "raw", "map"]) {
+      for (const k of Object.keys(btns)) {
         views[k].hidden = (k !== which);
         btns[k].classList.toggle("secondary", k !== which);
       }
       if (views[which].load) views[which].load();
     };
-    btns.preview.addEventListener("click", () => show("preview"));
-    btns.diff.addEventListener("click", () => show("diff"));
-    btns.raw.addEventListener("click", () => show("raw"));
-    btns.map.addEventListener("click", () => show("map"));
+    for (const k of Object.keys(btns)) btns[k].addEventListener("click", () => show(k));
   }
   function section(title, children) {
     // Collapsible section: separator above, chevron toggle on the right.
@@ -688,7 +744,7 @@ if (typeof document !== "undefined") {
     wrap.appendChild(body);
     return wrap;
   }
-  function cardHeaderWithSwitch(titleNode) {
+  function cardHeaderWithSwitch(titleNode, names) {
     const header = el("div", null, "row");
     const h = el("h3", null);
     h.style.flex = "1";
@@ -696,7 +752,7 @@ if (typeof document !== "undefined") {
     h.style.fontSize = "1.25rem";
     h.appendChild(titleNode);
     header.appendChild(h);
-    const sw = makeSwitch();
+    const sw = makeSwitch(names);
     header.appendChild(sw.wrap);
     return { header, btns: sw.btns };
   }
@@ -903,7 +959,7 @@ if (typeof document !== "undefined") {
       card.appendChild(el("p", "Error: " + item.error, "del"));
       return;
     }
-    const { header, btns } = cardHeaderWithSwitch(title);
+    const { header, btns } = cardHeaderWithSwitch(title, ["Preview", "Diff", "Raw", "Map"]);
     card.appendChild(header);
     if (item.conflict) {
       card.appendChild(el("p", "⚠ Version conflict: prefill expected v" + c.version + ", live is v" + item.current.version + ". Rebase before uploading.", "note"));
@@ -1040,7 +1096,7 @@ if (typeof document !== "undefined") {
     else if (action === "delete") title.appendChild(document.createTextNode(" (deleted)"));
     else if (oldObj) title.appendChild(document.createTextNode(" (base revision v" + oldObj.version + ")"));
     else title.appendChild(document.createTextNode(" (v" + obj.version + ")"));
-    const { header, btns } = cardHeaderWithSwitch(title);
+    const { header, btns } = cardHeaderWithSwitch(title, ["Preview", "Diff", "Map"]);
     card.appendChild(header);
     if (oldUnavailable) card.appendChild(el("p", "Previous version unavailable — diff shows new state only.", "note"));
     const oldTags = (oldObj && oldObj.tags) || {};
@@ -1078,17 +1134,15 @@ if (typeof document !== "undefined") {
     const md = obj.type === "relation" ? diffMembers(oldMembers, newMembers) : null;
     if (!td.length && (!md || (!md.added.length && !md.removed.length))) previewView.appendChild(el("p", "No differences", "muted"));
     const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation");
-    const rawView = buildRawPanel(newObj || oldObj);
     const emptyObj = { type: obj.type, id: obj.id, tags: {}, members: [], nodeRefs: null, lat: null, lon: null };
     let mapOld = oldObj, mapNew = newObj;
     if (action === "create") mapOld = emptyObj;
     if (action === "delete") mapNew = emptyObj;
     if (oldUnavailable || (action === "modify" && !oldObj)) mapOld = mapNew;
     const mapView = buildMapView(mapOld || emptyObj, mapNew || emptyObj);
-    wireSwitch(btns, { preview: previewView, diff: diffView, raw: rawView, map: mapView });
+    wireSwitch(btns, { preview: previewView, diff: diffView, map: mapView });
     card.appendChild(previewView);
     card.appendChild(diffView);
-    card.appendChild(rawView);
     card.appendChild(mapView);
     return card;
   }
