@@ -71,7 +71,6 @@
   .note { color: #e3b341; }
   details { margin: 8px 0; }
   summary { cursor: pointer; }
-  #log p { margin: 4px 0; }
   footer { padding-bottom: 32px; }
   dialog { background: #1a1d21; color: #e8e8e8; border: 1px solid #2a2e33; border-radius: 10px; max-width: 860px; padding: 20px; }
   dialog::backdrop { background: rgba(0,0,0,0.65); }
@@ -112,10 +111,6 @@
     <pre id="oscPreview" hidden></pre>
   </section>
 
-  <section id="log" class="panel">
-    <h2 style="margin-top:0">Log</h2>
-    <div id="logBody"></div>
-  </section>
 
 </main>
 <dialog id="helpDialog" tabindex="-1">
@@ -305,11 +300,10 @@ if (typeof document !== "undefined") {
   let items = []; // {change, current, computed, conflict, error}
   let openChangesetId = null;
 
+  // No visible log panel: diagnostics go to the console only.
   function log(msg, cls) {
-    const p = document.createElement("p");
-    p.textContent = msg;
-    if (cls) p.className = cls;
-    $("logBody").appendChild(p);
+    if (cls === "note") console.warn("[OSMPR] " + msg);
+    else console.log("[OSMPR] " + msg);
   }
   function el(tag, text, cls) {
     const n = document.createElement(tag);
