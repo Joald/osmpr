@@ -22,8 +22,9 @@ click Upload.
 ## One-time setup: OSM OAuth application
 
 The page talks to the OSM API directly from your browser, so it needs
-an OAuth 2.0 **public client** (PKCE, no client secret). Register it
-once:
+an OAuth 2.0 **public client** (PKCE, no client secret). A default
+client ID is built into the page, so most users need no setup at all.
+To use your own OAuth app instead, register it once:
 
 1. Open https://www.openstreetmap.org/ and go to
    My Settings → OAuth 2 Applications → Register new application.
@@ -34,8 +35,9 @@ once:
 4. Confidential application: **no** — this is a browser-only public
    client.
 5. Paste the client ID it gives you into the page (it is public, not
-   a secret). It is saved in your browser's localStorage, and links
-   can also include it as `?client_id=…`, so you only type it once.
+   a secret). It overrides the built-in default, is saved in your
+   browser's localStorage, and links can also include it as
+   `?client_id=…`, so you only type it once.
 
 ## Token storage
 
