@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, buildObjectXml, buildOsmChange };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, buildObjectXml, buildOsmChange } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildOsmChange } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -113,5 +113,14 @@ assert.ok(!n8Section.includes('ref="900002"'), "master osmChange must not contai
 
 // XML escaping
 assert.equal(escapeXml('a<b>&"c'), "a&lt;b&gt;&amp;&quot;c");
+
+// --- character-level diff ---
+assert.deepEqual(diffChars("abc", "abc"), [{ t: "same", s: "abc" }]);
+assert.deepEqual(diffChars("", "xy"), [{ t: "ins", s: "xy" }]);
+assert.deepEqual(diffChars("kitten", "sitting").filter((o) => o.t !== "same").map((o) => o.t + ":" + o.s).join(","), "del:k,ins:s,del:e,ins:i,ins:g");
+const big = diffChars("a".repeat(600), "b".repeat(600));
+assert.equal(big.length, 2);
+assert.equal(big[0].t, "del");
+assert.equal(big[1].t, "ins");
 
 console.log("All editor logic tests passed.");

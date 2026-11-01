@@ -12,9 +12,16 @@ shareable link: open the link, review the diff, click Upload.
    (see [Link format](#link-format)).
 2. You open it. The page fetches the current objects from the OSM API
    (public read), applies the encoded operations, and shows a diff
-   preview: added members, removed members, tag changes.
+   preview: added members, removed members, tag changes. Each object
+   card has **Diff** (character-level) and **Raw** (change JSON)
+   panels, collapsed by default.
 3. You click **Upload**. The page creates one changeset, uploads every
-   changed object, and closes the changeset.
+   changed object, and closes the changeset. A toast confirms the
+   upload, and the page switches to the new changeset's view.
+
+An existing changeset can be viewed the same way: open
+`?changeset=<id>`, or paste an id or changeset URL in the Changeset
+panel.
 
 After the first login, a typical edit is two clicks: open the link,
 click Upload.
@@ -84,16 +91,15 @@ present, `d` wins.
 
 ## Safety features
 
-- Preview shows added members (green), removed members (red), and
-  unchanged members collapsed (important for relations with hundreds
-  of members).
+- Preview shows added members (green) and removed members (red);
+  unchanged members are omitted. Per-card **Diff** shows a
+  character-level diff, **Raw** shows the change JSON.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before
   uploading.
-- If an upload fails midway, the open changeset ID stays visible with
-  a **Close open changeset** button, so nothing is left dangling
-  silently.
+- If an upload fails midway, the page tries to close the changeset
+  automatically, so nothing is left dangling silently.
 
 ## Development
 
