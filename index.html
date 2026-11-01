@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OSMPR</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2064%2064%27%3E%3Crect%20width%3D%2764%27%20height%3D%2764%27%20rx%3D%2714%27%20fill%3D%27%237ebc6f%27%2F%3E%3Ctext%20x%3D%2732%27%20y%3D%2727%27%20font-family%3D%27Arial%2C%20Helvetica%2C%20sans-serif%27%20font-size%3D%2720%27%20font-weight%3D%27700%27%20text-anchor%3D%27middle%27%20fill%3D%27%231a1d21%27%3EOSM%3C%2Ftext%3E%3Ctext%20x%3D%2732%27%20y%3D%2751%27%20font-family%3D%27Arial%2C%20Helvetica%2C%20sans-serif%27%20font-size%3D%2720%27%20font-weight%3D%27700%27%20text-anchor%3D%27middle%27%20fill%3D%27%231a1d21%27%3EPR%3C%2Ftext%3E%3C%2Fsvg%3E">
 <!--
   OSMPR — a single-file, zero-dependency, zero-backend editor
   for OpenStreetMap relation member edits (and tag edits).
@@ -82,8 +83,8 @@
 <header>
   <div class="row">
     <h1 style="margin:0">OSMPR</h1>
-    <span id="authStatus" class="muted small" style="margin-left:4px">Checking login…</span>
     <span style="flex:1"></span>
+    <span id="authStatus" class="muted small" style="text-align:right">Checking login…</span>
     <button id="loginBtn" type="button">Log in with OSM</button>
     <button id="logoutBtn" type="button" class="secondary">Log out</button>
     <button id="helpBtn" type="button" class="secondary" title="Help — link format">?</button>
@@ -305,6 +306,9 @@ if (typeof document !== "undefined") {
     if (cls === "note") console.warn("[OSMPR] " + msg);
     else console.log("[OSMPR] " + msg);
   }
+  function displayName(type, id, name) {
+    return name ? name + " (" + type + ", " + id + ")" : type + " " + id;
+  }
   function el(tag, text, cls) {
     const n = document.createElement(tag);
     if (text !== undefined && text !== null) n.textContent = text;
@@ -327,7 +331,7 @@ if (typeof document !== "undefined") {
     const t = getTokens();
     const client = getClientId();
     if (t && t.access_token) {
-      $("authStatus").textContent = t.expires_at ? "Logged in to OSM (token expires: " + new Date(t.expires_at).toLocaleString() + ")." : "Logged in to OSM.";
+      $("authStatus").textContent = t.expires_at ? "Logged in (token expires: " + new Date(t.expires_at).toLocaleString() + ")." : "Logged in.";
       $("loginBtn").hidden = true;
     } else {
       $("authStatus").textContent = "Not logged in yet. Click Log in with OSM, then Upload.";
@@ -442,7 +446,7 @@ if (typeof document !== "undefined") {
     items = [];
     for (const change of prefill.changes) {
       const card = el("div", null, "obj");
-      card.appendChild(el("h3", change.type + " " + change.id));
+      card.appendChild(el("h3", displayName(change.type, change.id, null)));
       card.appendChild(el("p", "Loading current version from OSM…", "muted"));
       $("preview").appendChild(card);
       const item = { change, current: null, computed: null, conflict: false, error: null, card };
@@ -452,7 +456,7 @@ if (typeof document !== "undefined") {
         item.current = current;
         if (change.version !== null && change.version !== current.version) {
           item.conflict = true;
-          log("Version conflict on " + change.type + " " + change.id + ": prefill expected v" + change.version + ", live is v" + current.version + ". Click Rebase to refetch and re-apply.", "note");
+          log("Version conflict on " + displayName(change.type, change.id, current.tags && current.tags.name) + ": prefill expected v" + change.version + ", live is v" + current.version + ". Click Rebase to refetch and re-apply.", "note");
         }
         item.computed = applyOps(current, change);
         renderItem(item);
@@ -467,7 +471,7 @@ if (typeof document !== "undefined") {
     const card = item.card;
     card.innerHTML = "";
     const c = item.change;
-    card.appendChild(el("h3", c.type + " " + c.id + (item.current ? "  (v" + item.current.version + " → v" + (item.current.version + 1) + ")" : "")));
+    card.appendChild(el("h3", displayName(c.type, c.id, item.current && item.current.tags && item.current.tags.name) + (item.current ? "  (v" + item.current.version + " → v" + (item.current.version + 1) + ")" : "")));
     if (item.error) {
       card.appendChild(el("p", "Error: " + item.error, "del"));
       return;
@@ -476,7 +480,6 @@ if (typeof document !== "undefined") {
       card.appendChild(el("p", "⚠ Version conflict: prefill expected v" + c.version + ", live is v" + item.current.version + ". Rebase before uploading.", "note"));
     }
     const cur = item.current, comp = item.computed;
-    if (cur.tags && cur.tags.name) card.appendChild(el("p", "Name: " + cur.tags.name, "muted"));
     if (c.type === "relation") {
       const d = diffMembers(cur.members, comp.members);
       const h = el("h3", "Members: " + cur.members.length + " → " + comp.members.length);
@@ -539,7 +542,7 @@ if (typeof document !== "undefined") {
         res = await fetch(API_BASE + "/" + it.change.type + "/" + it.change.id, { method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "text/xml" }, body: xml });
         if (!res.ok) throw new Error("Upload failed for " + it.change.type + " " + it.change.id + " (" + res.status + "): " + (await res.text()).slice(0, 300));
         const newVer = (await res.text()).trim();
-        log("Uploaded " + it.change.type + " " + it.change.id + " → v" + newVer + ".");
+        log("Uploaded " + displayName(it.change.type, it.change.id, it.current.tags && it.current.tags.name) + " → v" + newVer + ".");
       }
       res = await fetch(API_BASE + "/changeset/" + openChangesetId + "/close", { method: "PUT", headers: { Authorization: "Bearer " + token } });
       if (!res.ok) throw new Error("Changeset close failed (" + res.status + "): " + (await res.text()).slice(0, 300));
