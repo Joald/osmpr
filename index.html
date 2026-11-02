@@ -685,6 +685,14 @@ if (typeof document !== "undefined") {
   }
   // ---- Map view: OSM tiles via Leaflet (loaded from CDN on first use) ----
   const MAP_COLORS = { unchanged: "#8a8f98", added: "#7ee787", removed: "#ff7b72", old: "#ff7b72", new: "#7ee787", connector: "#8a8f98" };
+  // A coordinate entry is only usable if both fields are real numbers.
+  // filter(Boolean) is NOT enough here: a node element returned without
+  // lat/lon (e.g. a deleted node referenced by a way) becomes a truthy
+  // {lat: undefined, lon: undefined} object, which Leaflet rejects with
+  // "Invalid LatLng object: (undefined, undefined)" and which used to
+  // wipe the whole overview map via its catch.
+  const hasCoords = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
+  const cleanPts = (pts) => (pts || []).filter(hasCoords);
   async function fetchNodeCoords(ids) {
     const out = new Map();
     const uniq = [...new Set((ids || []).filter(Number.isInteger))];
@@ -693,7 +701,7 @@ if (typeof document !== "undefined") {
       const res = await fetch(API_BASE + "/nodes.json?nodes=" + chunk.join(","));
       if (!res.ok) throw new Error("Node fetch failed (" + res.status + ")");
       const data = await res.json();
-      for (const e of data.elements || []) if (e.type === "node") out.set(e.id, { lat: e.lat, lon: e.lon });
+      for (const e of data.elements || []) if (e.type === "node" && hasCoords(e)) out.set(e.id, { lat: e.lat, lon: e.lon });
     }
     return out;
   }
@@ -704,7 +712,7 @@ if (typeof document !== "undefined") {
     const nodeCoords = new Map(), wayNodes = new Map();
     let members = [];
     for (const e of data.elements || []) {
-      if (e.type === "node") nodeCoords.set(e.id, { lat: e.lat, lon: e.lon });
+      if (e.type === "node" && hasCoords(e)) nodeCoords.set(e.id, { lat: e.lat, lon: e.lon });
       else if (e.type === "way") wayNodes.set(e.id, e.nodes || []);
       else if (e.type === type && e.id === id && e.members) members = e.members.map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" }));
     }
@@ -727,7 +735,7 @@ if (typeof document !== "undefined") {
       else drawables.push({ kind: "unchanged", pts: [{ lat: oldObj.lat, lon: oldObj.lon }] });
     } else if (type === "way") {
       const coords = await fetchNodeCoords([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
-      const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(Boolean);
+      const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
       const oPts = line(oldObj.nodeRefs), nPts = line(newObj.nodeRefs);
       const changed = JSON.stringify(oldObj.nodeRefs) !== JSON.stringify(newObj.nodeRefs);
       if (changed) {
@@ -738,7 +746,7 @@ if (typeof document !== "undefined") {
       const full = await fetchObjectFull("relation", oldObj.id);
       const wayGeom = new Map();
       for (const [wid, refs] of full.wayNodes) {
-        const pts = refs.map((r) => full.nodeCoords.get(r)).filter(Boolean);
+        const pts = refs.map((r) => full.nodeCoords.get(r)).filter(hasCoords);
         if (pts.length >= 2) wayGeom.set(wid, pts);
       }
       // Member ways missing from the current full (added, or removed from
@@ -754,14 +762,14 @@ if (typeof document !== "undefined") {
           const pre = prefillComputed.get("way:" + wid);
           if (pre && pre.nodeRefs) {
             const coords = await fetchNodeCoords(pre.nodeRefs);
-            const pts = pre.nodeRefs.map((r) => coords.get(r)).filter(Boolean);
+            const pts = pre.nodeRefs.map((r) => coords.get(r)).filter(hasCoords);
             if (pts.length >= 2) wayGeom.set(wid, pts);
           }
           continue;
         }
         try {
           const wfull = await fetchObjectFull("way", wid);
-          const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(Boolean);
+          const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
           if (pts.length >= 2) wayGeom.set(wid, pts);
         } catch (e) { /* skip unfetchable way */ }
       }
@@ -809,18 +817,23 @@ if (typeof document !== "undefined") {
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
     const bounds = [];
     for (const d of drawables) {
+      // Last line of defence: drop points without real coordinates, so
+      // one bad drawable can never kill the whole map.
+      const pts = cleanPts(d.pts);
+      if (!pts.length) continue;
       const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
-      const latlngs = d.pts.map((p) => [p.lat, p.lon]);
+      const latlngs = pts.map((p) => [p.lat, p.lon]);
       bounds.push(...latlngs);
-      if (latlngs.length === 1) L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map);
+      if (latlngs.length === 1) { if (d.kind !== "connector") L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map); }
       else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(map);
       else {
-        const first = d.pts[0], last = d.pts[d.pts.length - 1];
+        const first = pts[0], last = pts[pts.length - 1];
         const closed = first.lat === last.lat && first.lon === last.lon;
         if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(map);
         else L.polyline(latlngs, { color, weight: 3 }).addTo(map);
       }
     }
+    if (!bounds.length) { div.innerHTML = ""; div.appendChild(el("p", emptyText, "muted")); return; }
     map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
     map.invalidateSize();
     div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
@@ -866,7 +879,7 @@ if (typeof document !== "undefined") {
       for (const [k, v] of fresh) cache.coords.set(k, v);
     }
     const coords = cache.coords;
-    const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(Boolean);
+    const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
     const externalIds = [];
     for (const p of pairs) {
       for (const m of [...((p.oldObj && p.oldObj.members) || []), ...((p.newObj && p.newObj.members) || [])]) {
@@ -881,7 +894,7 @@ if (typeof document !== "undefined") {
       if (externalGeom.has(wid)) continue;
       try {
         const wfull = await fetchObjectFull("way", wid);
-        const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(Boolean);
+        const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
         if (pts.length >= 2) externalGeom.set(wid, pts);
       } catch (e) { /* skip unfetchable way */ }
     }
@@ -946,13 +959,17 @@ if (typeof document !== "undefined") {
   function addDrawablesToLayer(layers, drawables) {
     const bounds = [];
     for (const d of drawables) {
+      // Last line of defence: drop points without real coordinates, so
+      // one bad drawable can never kill the whole overview map.
+      const pts = cleanPts(d.pts);
+      if (!pts.length) continue;
       const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
-      const latlngs = d.pts.map((p) => [p.lat, p.lon]);
+      const latlngs = pts.map((p) => [p.lat, p.lon]);
       bounds.push(...latlngs);
-      if (latlngs.length === 1) L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(layers);
+      if (latlngs.length === 1) { if (d.kind !== "connector") L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(layers); }
       else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(layers);
       else {
-        const first = d.pts[0], last = d.pts[d.pts.length - 1];
+        const first = pts[0], last = pts[pts.length - 1];
         const closed = first.lat === last.lat && first.lon === last.lon;
         if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(layers);
         else L.polyline(latlngs, { color, weight: 3 }).addTo(layers);
@@ -986,11 +1003,17 @@ if (typeof document !== "undefined") {
           L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
           const layers = L.layerGroup().addTo(map);
           const bounds = addDrawablesToLayer(layers, drawables);
-          map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
-          map.invalidateSize();
-          div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
-          mapState = { map, layers, note: null };
-          if (truncated) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
+          if (bounds.length) {
+            map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+            map.invalidateSize();
+            div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
+            mapState = { map, layers, note: null };
+            if (truncated) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
+          } else {
+            // Every drawable cleaned to nothing: no map, no fitBounds([]).
+            div.innerHTML = "";
+            div.appendChild(el("p", "No drawable geometry for this changeset.", "muted"));
+          }
         } else {
           mapState.layers.clearLayers();
           addDrawablesToLayer(mapState.layers, drawables);

@@ -123,7 +123,11 @@ present, `d` wins.
   have a separator and a chevron to collapse them.
 - The changeset overview map reuses one batched node-coordinate
   fetch and one fetch per external relation member way (capped at
-  200), instead of one fetch per card.
+  200), instead of one fetch per card. Coordinates without a real
+  lat/lon (e.g. a deleted node referenced by a way) are skipped
+  instead of breaking the map, and the renderers drop any
+  remaining invalid points, so one bad drawable never wipes the
+  whole map.
 - Previous versions are fetched for every modified object, in
   batches of 100 so a large changeset never hits the API with
   hundreds of requests at once. The page renders immediately;
