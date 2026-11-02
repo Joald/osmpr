@@ -124,12 +124,13 @@ present, `d` wins.
 - The changeset overview map reuses one batched node-coordinate
   fetch and one fetch per external relation member way (capped at
   200), instead of one fetch per card.
-- Previous versions are fetched for every modified object, but
-  staggered: the first 100 load with the page, the rest load
-  when their cards scroll into view (IntersectionObserver,
-  200px margin), so a large changeset never blocks on hundreds
-  of extra API requests at once. Until a card's previous version
-  loads, the card shows a loading state instead of a diff.
+- Previous versions are fetched for every modified object, in
+  batches of 20 so a large changeset never hits the API with
+  hundreds of requests at once. The page renders immediately;
+  each card swaps its loading state for the real diff as its
+  batch arrives, and the overview map updates its layers after
+  each batch (the map itself is created once, so pan/zoom are
+  not reset by an update).
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - A prefill object deleted on OSM (API 410) is reported as an

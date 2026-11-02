@@ -943,23 +943,63 @@ if (typeof document !== "undefined") {
     }
     return { drawables, truncated };
   }
+  function addDrawablesToLayer(layers, drawables) {
+    const bounds = [];
+    for (const d of drawables) {
+      const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
+      const latlngs = d.pts.map((p) => [p.lat, p.lon]);
+      bounds.push(...latlngs);
+      if (latlngs.length === 1) L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(layers);
+      else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(layers);
+      else {
+        const first = d.pts[0], last = d.pts[d.pts.length - 1];
+        const closed = first.lat === last.lat && first.lon === last.lon;
+        if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(layers);
+        else L.polyline(latlngs, { color, weight: 3 }).addTo(layers);
+      }
+    }
+    return bounds;
+  }
   function buildOverviewMapView(pairs, cache) {
     const div = document.createElement("div");
     div.className = "panel";
     div.appendChild(el("p", "Loading overview map…", "muted"));
+    // The map is created once; refreshes only replace its layers, so a
+    // user panning or zooming is not reset by every progressive update.
     // Re-entrant guard: a refresh requested while a draw is in flight runs
     // once afterwards, against the then-current pairs, instead of racing it.
-    let loading = false, queued = false;
+    let loading = false, queued = false, mapState = null;
     div.load = async () => {
       if (loading) { queued = true; return; }
       loading = true;
       try {
         const { drawables, truncated } = await collectOverviewDrawables(pairs, cache);
-        await drawMapIn(div, drawables, "No drawable geometry for this changeset.");
-        if (truncated) div.appendChild(el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"));
+        if (!drawables.length) {
+          if (!mapState) { div.innerHTML = ""; div.appendChild(el("p", "No drawable geometry for this changeset.", "muted")); }
+        } else if (!mapState) {
+          div.innerHTML = "";
+          const mapDiv = document.createElement("div");
+          mapDiv.style.height = "420px";
+          div.appendChild(mapDiv);
+          await loadLeaflet();
+          const map = L.map(mapDiv);
+          L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
+          const layers = L.layerGroup().addTo(map);
+          const bounds = addDrawablesToLayer(layers, drawables);
+          map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+          map.invalidateSize();
+          div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
+          mapState = { map, layers, note: null };
+          if (truncated) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
+        } else {
+          mapState.layers.clearLayers();
+          addDrawablesToLayer(mapState.layers, drawables);
+          if (truncated && !mapState.note) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
+        }
         div.dataset.drawn = "1";
       } catch (e) {
         div.innerHTML = "";
+        mapState = null;
         div.appendChild(el("p", "Overview map failed to load: " + e.message, "del"));
       } finally {
         loading = false;
@@ -1521,31 +1561,24 @@ if (typeof document !== "undefined") {
       const head = el("div", null, "panel");
       if (meta.tags && meta.tags.comment) head.appendChild(el("p", meta.tags.comment));
       head.appendChild(el("p", "by " + meta.user + " · created " + meta.created_at + (meta.closed_at ? " · closed " + meta.closed_at : " · open") + " · " + counts.create + " created, " + counts.modify + " modified, " + counts.delete + " deleted", "muted small"));
-      // Old versions for every modified object — but not all up front:
-      // one extra API request per modified object, so the first batch
-      // loads now and the rest load when their cards scroll into view.
-      const INITIAL_OLD_FETCH = 100;
-      const modifyIndices = entries.map((e, i) => (e.action === "modify" ? i : -1)).filter((i) => i >= 0);
-      const initialOld = new Set(modifyIndices.slice(0, INITIAL_OLD_FETCH));
+      // Old versions for every modified object, staggered so the API is
+      // not hit with hundreds of requests at once: the page renders
+      // immediately with loading cards, then batches of previous
+      // versions load in the background, updating their cards and the
+      // overview map as each batch arrives. The overview map needs the
+      // whole changeset, so nothing is gated on scrolling into view.
+      const OLD_BATCH_SIZE = 20;
       $("preview").appendChild(head);
-      const olds = await Promise.all(entries.map(async (e, i) => {
-        if (e.action !== "modify" || !initialOld.has(i)) return null;
-        try { return await fetchObject({ type: e.obj.type, id: e.obj.id }, e.obj.version - 1); }
-        catch (err) { return "unavailable"; }
-      }));
       if (!entries.length) {
         $("preview").appendChild(el("p", "Empty changeset.", "muted"));
       } else {
-        const pairs = entries.map((e, i) => {
-          const oldRaw = olds[i];
-          return {
-            action: e.action,
-            oldObj: e.action === "delete" ? e.obj : (oldRaw === "unavailable" ? null : oldRaw),
-            newObj: e.action === "delete" ? null : e.obj,
-            oldUnavailable: oldRaw === "unavailable",
-            oldPending: e.action === "modify" && !initialOld.has(i),
-          };
-        });
+        const pairs = entries.map((e) => ({
+          action: e.action,
+          oldObj: e.action === "delete" ? e.obj : null,
+          newObj: e.action === "delete" ? null : e.obj,
+          oldUnavailable: false,
+          oldPending: e.action === "modify",
+        }));
         const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldPending));
         // Overview map between the changeset description and the cards.
         const overviewCache = { coords: new Map(), external: new Map() };
@@ -1560,46 +1593,31 @@ if (typeof document !== "undefined") {
           if (groupCards.length) $("preview").appendChild(section(typeLabels[type] + " (" + groupCards.length + ")", groupCards));
         }
         overview.load();
-        // Lazy old versions: a pending card fetches its previous version
-        // when it scrolls near the viewport (200px margin, so the diff is
-        // usually ready on arrival), then re-renders in place with the
-        // real before/after diff. The overview map refreshes afterwards
-        // (debounced, reusing its coordinate/way cache).
-        let overviewTimer = null;
-        const scheduleOverviewRefresh = () => {
-          if (overviewTimer) clearTimeout(overviewTimer);
-          overviewTimer = setTimeout(() => overview.load(), 800);
-        };
-        const loadOldFor = async (pair, card) => {
-          if (!pair.oldPending) return;
-          pair.oldPending = false;
-          try {
-            pair.oldObj = await fetchObject({ type: pair.newObj.type, id: pair.newObj.id }, pair.newObj.version - 1);
-            pair.oldUnavailable = false;
-          } catch (err) {
-            pair.oldObj = null;
-            pair.oldUnavailable = true;
+        // Staggered background load of all previous versions.
+        const pending = pairs.map((p, i) => ({ p, i })).filter((x) => x.p.oldPending);
+        (async () => {
+          for (let s = 0; s < pending.length; s += OLD_BATCH_SIZE) {
+            const batch = pending.slice(s, s + OLD_BATCH_SIZE);
+            await Promise.all(batch.map(async ({ p, i }) => {
+              try {
+                p.oldObj = await fetchObject({ type: p.newObj.type, id: p.newObj.id }, p.newObj.version - 1);
+                p.oldUnavailable = false;
+              } catch (err) {
+                p.oldObj = null;
+                p.oldUnavailable = true;
+              }
+              p.oldPending = false;
+              const newCard = renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, false);
+              const oldCard = cards[i];
+              if (oldCard && oldCard.parentNode) oldCard.parentNode.replaceChild(newCard, oldCard);
+              cards[i] = newCard;
+            }));
+            // Refresh the overview map after each batch, so it fills in
+            // as old versions arrive (its cache keeps this cheap, and
+            // the map itself is not recreated, so pan/zoom survive).
+            overview.load();
           }
-          const newCard = renderChangesetCard(pair.action, pair.oldObj, pair.newObj, pair.oldUnavailable, pair.oldPending);
-          if (card.parentNode) card.parentNode.replaceChild(newCard, card);
-          scheduleOverviewRefresh();
-        };
-        if (typeof IntersectionObserver !== "undefined") {
-          const observer = new IntersectionObserver((obsEntries) => {
-            for (const en of obsEntries) {
-              if (!en.isIntersecting) continue;
-              observer.unobserve(en.target);
-              const idx = parseInt(en.target.dataset.lazyIdx, 10);
-              if (Number.isFinite(idx) && pairs[idx]) loadOldFor(pairs[idx], en.target);
-            }
-          }, { rootMargin: "200px" });
-          cards.forEach((card, i) => {
-            if (pairs[i].oldPending) { card.dataset.lazyIdx = String(i); observer.observe(card); }
-          });
-        } else {
-          // No IntersectionObserver: fall back to loading the rest now.
-          pairs.forEach((pair, i) => { if (pair.oldPending) loadOldFor(pair, cards[i]); });
-        }
+        })();
       }
     } catch (e) {
       $("preview").innerHTML = "";
