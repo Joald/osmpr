@@ -796,6 +796,35 @@ if (typeof document !== "undefined") {
     leafletPromise.catch(() => { leafletPromise = null; });
     return leafletPromise;
   }
+  async function drawMapIn(div, drawables, emptyText) {
+    // Shared Leaflet rendering for per-card maps and the changeset overview
+    // map: drawables are {kind, pts: [{lat, lon}]} as in collectMapDrawables.
+    div.innerHTML = "";
+    if (!drawables.length) { div.appendChild(el("p", emptyText, "muted")); return; }
+    const mapDiv = document.createElement("div");
+    mapDiv.style.height = "420px";
+    div.appendChild(mapDiv);
+    await loadLeaflet();
+    const map = L.map(mapDiv);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
+    const bounds = [];
+    for (const d of drawables) {
+      const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
+      const latlngs = d.pts.map((p) => [p.lat, p.lon]);
+      bounds.push(...latlngs);
+      if (latlngs.length === 1) L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map);
+      else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(map);
+      else {
+        const first = d.pts[0], last = d.pts[d.pts.length - 1];
+        const closed = first.lat === last.lat && first.lon === last.lon;
+        if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(map);
+        else L.polyline(latlngs, { color, weight: 3 }).addTo(map);
+      }
+    }
+    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+    map.invalidateSize();
+    div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
+  }
   function buildMapView(oldObj, newObj) {
     const div = document.createElement("div");
     div.hidden = true;
@@ -806,34 +835,117 @@ if (typeof document !== "undefined") {
       loaded = true;
       try {
         const drawables = await collectMapDrawables(oldObj, newObj);
-        div.innerHTML = "";
-        if (!drawables.length) { div.appendChild(el("p", "No drawable geometry for this object.", "muted")); return; }
-        const mapDiv = document.createElement("div");
-        mapDiv.style.height = "420px";
-        div.appendChild(mapDiv);
-        await loadLeaflet();
-        const map = L.map(mapDiv);
-        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
-        const bounds = [];
-        for (const d of drawables) {
-          const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
-          const latlngs = d.pts.map((p) => [p.lat, p.lon]);
-          bounds.push(...latlngs);
-          if (latlngs.length === 1) L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map);
-          else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(map);
-          else {
-            const first = d.pts[0], last = d.pts[d.pts.length - 1];
-            const closed = first.lat === last.lat && first.lon === last.lon;
-            if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(map);
-            else L.polyline(latlngs, { color, weight: 3 }).addTo(map);
-          }
-        }
-        map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
-        map.invalidateSize();
-        div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
+        await drawMapIn(div, drawables, "No drawable geometry for this object.");
       } catch (e) {
         div.innerHTML = "";
         div.appendChild(el("p", "Map failed to load: " + e.message, "del"));
+      }
+    };
+    return div;
+  }
+  async function collectOverviewDrawables(pairs) {
+    // One drawable set for a whole changeset, with shared fetches: node
+    // coordinates for all changed ways are fetched once (batched), and
+    // each external relation member way is fetched once, capped at 200.
+    // pairs: {action, oldObj, newObj}; oldObj is null when the previous
+    // version was not fetched (large changeset) and newObj is null for
+    // deletes. In that no-old case the new state draws as "added".
+    const drawables = [];
+    const newWayRefs = new Map(), oldWayRefs = new Map();
+    const nodeIds = [];
+    for (const p of pairs) {
+      if (p.newObj && p.newObj.type === "way") { newWayRefs.set(p.newObj.id, p.newObj.nodeRefs || []); nodeIds.push(...(p.newObj.nodeRefs || [])); }
+      if (p.oldObj && p.oldObj.type === "way") { oldWayRefs.set(p.oldObj.id, p.oldObj.nodeRefs || []); nodeIds.push(...(p.oldObj.nodeRefs || [])); }
+    }
+    const coords = await fetchNodeCoords(nodeIds);
+    const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(Boolean);
+    const externalIds = [];
+    for (const p of pairs) {
+      for (const m of [...((p.oldObj && p.oldObj.members) || []), ...((p.newObj && p.newObj.members) || [])]) {
+        if (m.type !== "way") continue;
+        if (newWayRefs.has(m.ref) || oldWayRefs.has(m.ref)) continue;
+        if (!externalIds.includes(m.ref)) externalIds.push(m.ref);
+      }
+    }
+    const truncated = externalIds.length > 200;
+    const externalGeom = new Map();
+    for (const wid of externalIds.slice(0, 200)) {
+      try {
+        const wfull = await fetchObjectFull("way", wid);
+        const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(Boolean);
+        if (pts.length >= 2) externalGeom.set(wid, pts);
+      } catch (e) { /* skip unfetchable way */ }
+    }
+    const memberPts = (m, which) => {
+      const refs = which === "old" ? oldWayRefs.get(m.ref) : newWayRefs.get(m.ref);
+      if (refs) return line(refs);
+      return externalGeom.get(m.ref) || null;
+    };
+    const pushWayMembers = (members, which, kind) => {
+      for (const m of members || []) {
+        if (m.type !== "way") continue;
+        const pts = memberPts(m, which);
+        if (pts) drawables.push({ kind, pts });
+      }
+    };
+    for (const p of pairs) {
+      if (p.action === "create") {
+        const o = p.newObj;
+        if (!o) continue;
+        if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }] });
+        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts }); }
+        else if (o.type === "relation") pushWayMembers(o.members, "new", "added");
+      } else if (p.action === "delete") {
+        const o = p.oldObj;
+        if (!o) continue;
+        if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "removed", pts: [{ lat: o.lat, lon: o.lon }] });
+        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts }); }
+        else if (o.type === "relation") pushWayMembers(o.members, "old", "removed");
+      } else {
+        // modify
+        const o = p.newObj, old = p.oldObj;
+        if (!o) continue;
+        if (o.type === "node") {
+          if (!old || old.lat == null || old.lon == null) {
+            if (o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }] });
+          } else if (old.lat !== o.lat || old.lon !== o.lon) {
+            const op = { lat: old.lat, lon: old.lon }, np = { lat: o.lat, lon: o.lon };
+            drawables.push({ kind: "old", pts: [op] });
+            drawables.push({ kind: "connector", pts: [op, np] });
+            drawables.push({ kind: "new", pts: [np] });
+          } else drawables.push({ kind: "unchanged", pts: [{ lat: o.lat, lon: o.lon }] });
+        } else if (o.type === "way") {
+          if (!old) { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts }); }
+          else if (JSON.stringify(old.nodeRefs || null) !== JSON.stringify(o.nodeRefs || null)) {
+            const oPts = line(old.nodeRefs), nPts = line(o.nodeRefs);
+            if (oPts.length >= 2) drawables.push({ kind: "old", pts: oPts });
+            if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts });
+          } else { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts }); }
+        } else if (o.type === "relation") {
+          const oldMembers = (old && old.members) || [];
+          const newMembers = o.members || [];
+          const oldKeys = new Set(oldMembers.map(memberKey));
+          const newKeys = new Set(newMembers.map(memberKey));
+          pushWayMembers(newMembers.filter((m) => oldKeys.has(memberKey(m))), "new", "unchanged");
+          pushWayMembers(oldMembers.filter((m) => !newKeys.has(memberKey(m))), "old", "removed");
+          pushWayMembers(newMembers.filter((m) => !oldKeys.has(memberKey(m))), "new", "added");
+        }
+      }
+    }
+    return { drawables, truncated };
+  }
+  function buildOverviewMapView(pairs) {
+    const div = document.createElement("div");
+    div.className = "panel";
+    div.appendChild(el("p", "Loading overview map…", "muted"));
+    div.load = async () => {
+      try {
+        const { drawables, truncated } = await collectOverviewDrawables(pairs);
+        await drawMapIn(div, drawables, "No drawable geometry for this changeset.");
+        if (truncated) div.appendChild(el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"));
+      } catch (e) {
+        div.innerHTML = "";
+        div.appendChild(el("p", "Overview map failed to load: " + e.message, "del"));
       }
     };
     return div;
@@ -1281,7 +1393,7 @@ if (typeof document !== "undefined") {
     }
     return out;
   }
-  function renderChangesetCard(action, oldObj, newObj, oldUnavailable) {
+  function renderChangesetCard(action, oldObj, newObj, oldUnavailable, oldSkipped) {
     const obj = newObj || oldObj;
     const card = el("div", null, "obj");
     const title = document.createElement("span");
@@ -1293,6 +1405,7 @@ if (typeof document !== "undefined") {
     const { header, btns } = cardHeaderWithSwitch(title, ["Preview", "Diff", "Map"]);
     card.appendChild(header);
     if (oldUnavailable) card.appendChild(el("p", "Previous version unavailable — diff shows new state only.", "note"));
+    if (oldSkipped) card.appendChild(el("p", "Previous version not fetched for this large changeset — showing new state only.", "note"));
     const oldTags = (oldObj && oldObj.tags) || {};
     const oldMembers = (oldObj && oldObj.members) || [];
     const newTags = (newObj && newObj.tags) || {};
@@ -1372,22 +1485,42 @@ if (typeof document !== "undefined") {
       const head = el("div", null, "panel");
       if (meta.tags && meta.tags.comment) head.appendChild(el("p", meta.tags.comment));
       head.appendChild(el("p", "by " + meta.user + " · created " + meta.created_at + (meta.closed_at ? " · closed " + meta.closed_at : " · open") + " · " + counts.create + " created, " + counts.modify + " modified, " + counts.delete + " deleted", "muted small"));
-      if (entries.length > 100) head.appendChild(el("p", "Large changeset: previous versions not fetched for diff.", "note"));
+      const isLarge = entries.length > 100;
+      if (isLarge) head.appendChild(el("p", "Large changeset (" + entries.length + " objects): previous versions not fetched, to avoid one extra API request per modified object — modified objects show the new state only.", "note"));
       $("preview").appendChild(head);
-      const needOld = entries.length <= 100;
+      const needOld = !isLarge;
       const olds = await Promise.all(entries.map(async (e) => {
         if (e.action !== "modify" || !needOld) return null;
         try { return await fetchObject({ type: e.obj.type, id: e.obj.id }, e.obj.version - 1); }
         catch (err) { return "unavailable"; }
       }));
-      for (let i = 0; i < entries.length; i++) {
-        const e = entries[i];
-        const oldRaw = olds[i];
-        const oldObj = e.action === "delete" ? e.obj : (oldRaw === "unavailable" ? null : oldRaw);
-        const newObj = e.action === "delete" ? null : e.obj;
-        $("preview").appendChild(renderChangesetCard(e.action, oldObj, newObj, oldRaw === "unavailable"));
+      if (!entries.length) {
+        $("preview").appendChild(el("p", "Empty changeset.", "muted"));
+      } else {
+        const pairs = entries.map((e, i) => {
+          const oldRaw = olds[i];
+          return {
+            action: e.action,
+            oldObj: e.action === "delete" ? e.obj : (oldRaw === "unavailable" ? null : oldRaw),
+            newObj: e.action === "delete" ? null : e.obj,
+            oldUnavailable: oldRaw === "unavailable",
+            oldSkipped: isLarge && e.action === "modify",
+          };
+        });
+        const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldSkipped));
+        // Overview map between the changeset description and the cards.
+        const overview = buildOverviewMapView(pairs);
+        $("preview").appendChild(overview);
+        // Cards grouped by object type, each group collapsible (expanded
+        // by default, like the Tags/Members sections inside a card).
+        const typeLabels = { node: "Nodes", way: "Ways", relation: "Relations" };
+        for (const type of ["node", "way", "relation"]) {
+          const groupCards = [];
+          pairs.forEach((p, i) => { if ((p.newObj || p.oldObj).type === type) groupCards.push(cards[i]); });
+          if (groupCards.length) $("preview").appendChild(section(typeLabels[type] + " (" + groupCards.length + ")", groupCards));
+        }
+        overview.load();
       }
-      if (!entries.length) $("preview").appendChild(el("p", "Empty changeset.", "muted"));
     } catch (e) {
       $("preview").innerHTML = "";
       $("preview").appendChild(el("p", "Error loading changeset: " + e.message, "del"));

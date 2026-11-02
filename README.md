@@ -18,6 +18,10 @@ shareable link: open the link, review the diff, click Upload.
    object on OpenStreetMap tiles and highlights geometry changes.
    Changeset cards have Preview / Diff / Map (no Raw: there is no
    custom-format change object to show, only the before/after states).
+   In changeset view the cards are grouped into collapsible
+   Nodes / Ways / Relations sections, and an overview map between
+   the changeset description and the cards shows every changed
+   object on one map (nodes, ways, and relation member ways).
 3. You click **Upload**. The page creates one changeset, uploads every
    changed object, and closes the changeset. A toast confirms the
    upload, and the page switches to the new changeset's view.
@@ -117,6 +121,13 @@ present, `d` wins.
   object on OpenStreetMap tiles (Leaflet, loaded from CDN on first
   use) and highlights old vs new geometry. Sections (Tags, Members)
   have a separator and a chevron to collapse them.
+- The changeset overview map reuses one batched node-coordinate
+  fetch and one fetch per external relation member way (capped at
+  200), instead of one fetch per card.
+- Changesets with more than 100 objects do not fetch previous
+  versions: that would cost one extra API request per modified
+  object, so modified objects in such changesets show the new
+  state only, and each card says so.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before
