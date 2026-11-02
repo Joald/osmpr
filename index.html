@@ -735,11 +735,19 @@ if (typeof document !== "undefined") {
         if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts });
       } else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
     } else if (type === "relation") {
-      const full = await fetchObjectFull("relation", oldObj.id);
+      // A deleted relation has no current full object: the API answers
+      // 410 Gone for /relation/<id>/full.json once the relation is
+      // deleted, which must not fail the whole map. Fall back to the
+      // member ways from oldObj/newObj, fetched individually below
+      // (member ways are not deleted, so their full fetches succeed).
+      let full = null;
+      try { full = await fetchObjectFull("relation", oldObj.id); } catch (e) { /* deleted relation in changeset view */ }
       const wayGeom = new Map();
-      for (const [wid, refs] of full.wayNodes) {
-        const pts = refs.map((r) => full.nodeCoords.get(r)).filter(Boolean);
-        if (pts.length >= 2) wayGeom.set(wid, pts);
+      if (full) {
+        for (const [wid, refs] of full.wayNodes) {
+          const pts = refs.map((r) => full.nodeCoords.get(r)).filter(Boolean);
+          if (pts.length >= 2) wayGeom.set(wid, pts);
+        }
       }
       // Member ways missing from the current full (added, or removed from
       // current in changeset view): fetch individually, capped.
