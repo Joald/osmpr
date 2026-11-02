@@ -129,9 +129,11 @@ present, `d` wins.
   when their cards scroll into view (IntersectionObserver,
   200px margin), so a large changeset never blocks on hundreds
   of extra API requests at once. Until a card's previous version
-  loads, the card says so instead of showing a real diff.
+  loads, the card shows a loading state instead of a diff.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
+- A prefill object deleted on OSM (API 410) is reported as an
+  invalid link — the object no longer exists — and blocks upload.
 - **Show osmChange XML** and **Download .osc** for inspection before
   uploading.
 - If an upload fails midway, the page tries to close the changeset

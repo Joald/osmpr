@@ -1086,8 +1086,9 @@ if (typeof document !== "undefined") {
     if (viewMode === "changeset") return;
     const anyChanged = items.some((it) => it.computed && it.computed.changed && !it.conflict && !it.error);
     const anyConflict = items.some((it) => it.conflict);
+    const anyDeleted = items.some((it) => it.deleted);
     const loggedIn = !!(getTokens() && getTokens().access_token);
-    $("uploadBtn").disabled = !(loggedIn && anyChanged && !anyConflict && items.length > 0);
+    $("uploadBtn").disabled = !(loggedIn && anyChanged && !anyConflict && !anyDeleted && items.length > 0);
     $("rebaseBtn").hidden = !anyConflict;
   }
   function randomString(len) {
@@ -1172,7 +1173,13 @@ if (typeof document !== "undefined") {
   async function fetchObject(change, version) {
     const url = API_BASE + "/" + change.type + "/" + change.id + (version ? "/" + version : "") + ".json";
     const res = await fetch(url);
-    if (!res.ok) throw new Error("Fetch failed (" + res.status + ") for " + change.type + " " + change.id);
+    if (!res.ok) {
+      // 410 Gone is OSM's answer for a deleted object. Keep it distinct
+      // from a generic fetch failure so callers can say so plainly.
+      const err = new Error(res.status === 410 ? "Object deleted: " + change.type + " " + change.id : "Fetch failed (" + res.status + ") for " + change.type + " " + change.id);
+      err.deleted = res.status === 410;
+      throw err;
+    }
     const data = await res.json();
     const obj = (data.elements || []).find((e) => e.type === change.type && e.id === change.id);
     if (!obj) throw new Error("Object not found: " + change.type + " " + change.id);
@@ -1199,7 +1206,7 @@ if (typeof document !== "undefined") {
       card.appendChild(lh);
       card.appendChild(el("p", "Loading current version from OSM…", "muted"));
       $("preview").appendChild(card);
-      const item = { change, current: null, computed: null, conflict: false, error: null, card };
+      const item = { change, current: null, computed: null, conflict: false, error: null, deleted: false, card };
       items.push(item);
       try {
         let current;
@@ -1228,6 +1235,7 @@ if (typeof document !== "undefined") {
         renderItem(item);
       } catch (e) {
         item.error = e.message;
+        item.deleted = !!e.deleted;
         renderItem(item);
       }
       updateUploadButton();
@@ -1246,7 +1254,8 @@ if (typeof document !== "undefined") {
       h.style.fontSize = "1.25rem";
       h.appendChild(title);
       card.appendChild(h);
-      card.appendChild(el("p", "Error: " + item.error, "del"));
+      if (item.deleted) card.appendChild(el("p", "This object was deleted on OpenStreetMap, so this link is invalid: it refers to an object that no longer exists.", "del"));
+      else card.appendChild(el("p", "Error: " + item.error, "del"));
       return;
     }
     const { header, btns } = cardHeaderWithSwitch(title, ["Preview", "Diff", "Raw", "Map"]);
@@ -1420,10 +1429,19 @@ if (typeof document !== "undefined") {
     else if (action === "delete") title.appendChild(document.createTextNode(" (deleted)"));
     else if (oldObj) title.appendChild(document.createTextNode(" (base revision v" + oldObj.version + ")"));
     else title.appendChild(document.createTextNode(" (v" + obj.version + ")"));
+    if (oldPending) {
+      // No fake diff yet: the card shows a loading state until its
+      // previous version arrives, then it is replaced with the real card.
+      const h = el("h3", null);
+      h.style.fontSize = "1.25rem";
+      h.appendChild(title);
+      card.appendChild(h);
+      card.appendChild(el("p", "Loading previous version…", "muted"));
+      return card;
+    }
     const { header, btns } = cardHeaderWithSwitch(title, ["Preview", "Diff", "Map"]);
     card.appendChild(header);
     if (oldUnavailable) card.appendChild(el("p", "Previous version unavailable — diff shows new state only.", "note"));
-    if (oldPending) card.appendChild(el("p", "Previous version not loaded yet — it loads when this card scrolls into view.", "note"));
     const oldTags = (oldObj && oldObj.tags) || {};
     const oldMembers = (oldObj && oldObj.members) || [];
     const newTags = (newObj && newObj.tags) || {};
@@ -1509,8 +1527,6 @@ if (typeof document !== "undefined") {
       const INITIAL_OLD_FETCH = 100;
       const modifyIndices = entries.map((e, i) => (e.action === "modify" ? i : -1)).filter((i) => i >= 0);
       const initialOld = new Set(modifyIndices.slice(0, INITIAL_OLD_FETCH));
-      const pendingOldCount = modifyIndices.length - initialOld.size;
-      if (pendingOldCount > 0) head.appendChild(el("p", "Previous versions loaded for the first " + INITIAL_OLD_FETCH + " modified objects; the rest load when their cards scroll into view.", "note"));
       $("preview").appendChild(head);
       const olds = await Promise.all(entries.map(async (e, i) => {
         if (e.action !== "modify" || !initialOld.has(i)) return null;
