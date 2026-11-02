@@ -125,7 +125,7 @@ present, `d` wins.
   fetch and one fetch per external relation member way (capped at
   200), instead of one fetch per card.
 - Previous versions are fetched for every modified object, in
-  batches of 20 so a large changeset never hits the API with
+  batches of 100 so a large changeset never hits the API with
   hundreds of requests at once. The page renders immediately;
   each card swaps its loading state for the real diff as its
   batch arrives, and the overview map updates its layers after

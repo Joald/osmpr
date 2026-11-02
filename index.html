@@ -1567,7 +1567,7 @@ if (typeof document !== "undefined") {
       // versions load in the background, updating their cards and the
       // overview map as each batch arrives. The overview map needs the
       // whole changeset, so nothing is gated on scrolling into view.
-      const OLD_BATCH_SIZE = 20;
+      const OLD_BATCH_SIZE = 100;
       $("preview").appendChild(head);
       if (!entries.length) {
         $("preview").appendChild(el("p", "Empty changeset.", "muted"));
