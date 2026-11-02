@@ -843,10 +843,13 @@ if (typeof document !== "undefined") {
     };
     return div;
   }
-  async function collectOverviewDrawables(pairs) {
+  async function collectOverviewDrawables(pairs, cache) {
     // One drawable set for a whole changeset, with shared fetches: node
     // coordinates for all changed ways are fetched once (batched), and
     // each external relation member way is fetched once, capped at 200.
+    // cache persists across overview refreshes (lazy old versions arriving
+    // later), so a refresh only fetches coordinates it has not seen yet.
+    cache = cache || { coords: new Map(), external: new Map() };
     // pairs: {action, oldObj, newObj}; oldObj is null when the previous
     // version was not fetched (large changeset) and newObj is null for
     // deletes. In that no-old case the new state draws as "added".
@@ -857,7 +860,12 @@ if (typeof document !== "undefined") {
       if (p.newObj && p.newObj.type === "way") { newWayRefs.set(p.newObj.id, p.newObj.nodeRefs || []); nodeIds.push(...(p.newObj.nodeRefs || [])); }
       if (p.oldObj && p.oldObj.type === "way") { oldWayRefs.set(p.oldObj.id, p.oldObj.nodeRefs || []); nodeIds.push(...(p.oldObj.nodeRefs || [])); }
     }
-    const coords = await fetchNodeCoords(nodeIds);
+    const missingIds = [...new Set(nodeIds)].filter((id) => !cache.coords.has(id));
+    if (missingIds.length) {
+      const fresh = await fetchNodeCoords(missingIds);
+      for (const [k, v] of fresh) cache.coords.set(k, v);
+    }
+    const coords = cache.coords;
     const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(Boolean);
     const externalIds = [];
     for (const p of pairs) {
@@ -868,8 +876,9 @@ if (typeof document !== "undefined") {
       }
     }
     const truncated = externalIds.length > 200;
-    const externalGeom = new Map();
+    const externalGeom = cache.external;
     for (const wid of externalIds.slice(0, 200)) {
+      if (externalGeom.has(wid)) continue;
       try {
         const wfull = await fetchObjectFull("way", wid);
         const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(Boolean);
@@ -934,18 +943,27 @@ if (typeof document !== "undefined") {
     }
     return { drawables, truncated };
   }
-  function buildOverviewMapView(pairs) {
+  function buildOverviewMapView(pairs, cache) {
     const div = document.createElement("div");
     div.className = "panel";
     div.appendChild(el("p", "Loading overview map…", "muted"));
+    // Re-entrant guard: a refresh requested while a draw is in flight runs
+    // once afterwards, against the then-current pairs, instead of racing it.
+    let loading = false, queued = false;
     div.load = async () => {
+      if (loading) { queued = true; return; }
+      loading = true;
       try {
-        const { drawables, truncated } = await collectOverviewDrawables(pairs);
+        const { drawables, truncated } = await collectOverviewDrawables(pairs, cache);
         await drawMapIn(div, drawables, "No drawable geometry for this changeset.");
         if (truncated) div.appendChild(el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"));
+        div.dataset.drawn = "1";
       } catch (e) {
         div.innerHTML = "";
         div.appendChild(el("p", "Overview map failed to load: " + e.message, "del"));
+      } finally {
+        loading = false;
+        if (queued) { queued = false; div.load(); }
       }
     };
     return div;
@@ -1393,7 +1411,7 @@ if (typeof document !== "undefined") {
     }
     return out;
   }
-  function renderChangesetCard(action, oldObj, newObj, oldUnavailable, oldSkipped) {
+  function renderChangesetCard(action, oldObj, newObj, oldUnavailable, oldPending) {
     const obj = newObj || oldObj;
     const card = el("div", null, "obj");
     const title = document.createElement("span");
@@ -1405,7 +1423,7 @@ if (typeof document !== "undefined") {
     const { header, btns } = cardHeaderWithSwitch(title, ["Preview", "Diff", "Map"]);
     card.appendChild(header);
     if (oldUnavailable) card.appendChild(el("p", "Previous version unavailable — diff shows new state only.", "note"));
-    if (oldSkipped) card.appendChild(el("p", "Previous version not fetched for this large changeset — showing new state only.", "note"));
+    if (oldPending) card.appendChild(el("p", "Previous version not loaded yet — it loads when this card scrolls into view.", "note"));
     const oldTags = (oldObj && oldObj.tags) || {};
     const oldMembers = (oldObj && oldObj.members) || [];
     const newTags = (newObj && newObj.tags) || {};
@@ -1485,12 +1503,17 @@ if (typeof document !== "undefined") {
       const head = el("div", null, "panel");
       if (meta.tags && meta.tags.comment) head.appendChild(el("p", meta.tags.comment));
       head.appendChild(el("p", "by " + meta.user + " · created " + meta.created_at + (meta.closed_at ? " · closed " + meta.closed_at : " · open") + " · " + counts.create + " created, " + counts.modify + " modified, " + counts.delete + " deleted", "muted small"));
-      const isLarge = entries.length > 100;
-      if (isLarge) head.appendChild(el("p", "Large changeset (" + entries.length + " objects): previous versions not fetched, to avoid one extra API request per modified object — modified objects show the new state only.", "note"));
+      // Old versions for every modified object — but not all up front:
+      // one extra API request per modified object, so the first batch
+      // loads now and the rest load when their cards scroll into view.
+      const INITIAL_OLD_FETCH = 100;
+      const modifyIndices = entries.map((e, i) => (e.action === "modify" ? i : -1)).filter((i) => i >= 0);
+      const initialOld = new Set(modifyIndices.slice(0, INITIAL_OLD_FETCH));
+      const pendingOldCount = modifyIndices.length - initialOld.size;
+      if (pendingOldCount > 0) head.appendChild(el("p", "Previous versions loaded for the first " + INITIAL_OLD_FETCH + " modified objects; the rest load when their cards scroll into view.", "note"));
       $("preview").appendChild(head);
-      const needOld = !isLarge;
-      const olds = await Promise.all(entries.map(async (e) => {
-        if (e.action !== "modify" || !needOld) return null;
+      const olds = await Promise.all(entries.map(async (e, i) => {
+        if (e.action !== "modify" || !initialOld.has(i)) return null;
         try { return await fetchObject({ type: e.obj.type, id: e.obj.id }, e.obj.version - 1); }
         catch (err) { return "unavailable"; }
       }));
@@ -1504,12 +1527,13 @@ if (typeof document !== "undefined") {
             oldObj: e.action === "delete" ? e.obj : (oldRaw === "unavailable" ? null : oldRaw),
             newObj: e.action === "delete" ? null : e.obj,
             oldUnavailable: oldRaw === "unavailable",
-            oldSkipped: isLarge && e.action === "modify",
+            oldPending: e.action === "modify" && !initialOld.has(i),
           };
         });
-        const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldSkipped));
+        const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldPending));
         // Overview map between the changeset description and the cards.
-        const overview = buildOverviewMapView(pairs);
+        const overviewCache = { coords: new Map(), external: new Map() };
+        const overview = buildOverviewMapView(pairs, overviewCache);
         $("preview").appendChild(overview);
         // Cards grouped by object type, each group collapsible (expanded
         // by default, like the Tags/Members sections inside a card).
@@ -1520,6 +1544,46 @@ if (typeof document !== "undefined") {
           if (groupCards.length) $("preview").appendChild(section(typeLabels[type] + " (" + groupCards.length + ")", groupCards));
         }
         overview.load();
+        // Lazy old versions: a pending card fetches its previous version
+        // when it scrolls near the viewport (200px margin, so the diff is
+        // usually ready on arrival), then re-renders in place with the
+        // real before/after diff. The overview map refreshes afterwards
+        // (debounced, reusing its coordinate/way cache).
+        let overviewTimer = null;
+        const scheduleOverviewRefresh = () => {
+          if (overviewTimer) clearTimeout(overviewTimer);
+          overviewTimer = setTimeout(() => overview.load(), 800);
+        };
+        const loadOldFor = async (pair, card) => {
+          if (!pair.oldPending) return;
+          pair.oldPending = false;
+          try {
+            pair.oldObj = await fetchObject({ type: pair.newObj.type, id: pair.newObj.id }, pair.newObj.version - 1);
+            pair.oldUnavailable = false;
+          } catch (err) {
+            pair.oldObj = null;
+            pair.oldUnavailable = true;
+          }
+          const newCard = renderChangesetCard(pair.action, pair.oldObj, pair.newObj, pair.oldUnavailable, pair.oldPending);
+          if (card.parentNode) card.parentNode.replaceChild(newCard, card);
+          scheduleOverviewRefresh();
+        };
+        if (typeof IntersectionObserver !== "undefined") {
+          const observer = new IntersectionObserver((obsEntries) => {
+            for (const en of obsEntries) {
+              if (!en.isIntersecting) continue;
+              observer.unobserve(en.target);
+              const idx = parseInt(en.target.dataset.lazyIdx, 10);
+              if (Number.isFinite(idx) && pairs[idx]) loadOldFor(pairs[idx], en.target);
+            }
+          }, { rootMargin: "200px" });
+          cards.forEach((card, i) => {
+            if (pairs[i].oldPending) { card.dataset.lazyIdx = String(i); observer.observe(card); }
+          });
+        } else {
+          // No IntersectionObserver: fall back to loading the rest now.
+          pairs.forEach((pair, i) => { if (pair.oldPending) loadOldFor(pair, cards[i]); });
+        }
       }
     } catch (e) {
       $("preview").innerHTML = "";

@@ -124,10 +124,12 @@ present, `d` wins.
 - The changeset overview map reuses one batched node-coordinate
   fetch and one fetch per external relation member way (capped at
   200), instead of one fetch per card.
-- Changesets with more than 100 objects do not fetch previous
-  versions: that would cost one extra API request per modified
-  object, so modified objects in such changesets show the new
-  state only, and each card says so.
+- Previous versions are fetched for every modified object, but
+  staggered: the first 100 load with the page, the rest load
+  when their cards scroll into view (IntersectionObserver,
+  200px margin), so a large changeset never blocks on hundreds
+  of extra API requests at once. Until a card's previous version
+  loads, the card says so instead of showing a real diff.
 - Tag diffs listed separately; unchanged tags hidden.
 - Version conflicts block upload until Rebase.
 - **Show osmChange XML** and **Download .osc** for inspection before
