@@ -1126,13 +1126,22 @@ if (typeof document !== "undefined") {
     };
     return div;
   }
-  async function collectOverviewDrawables(pairs, cache) {
+  async function collectOverviewDrawables(pairs, cache, changesetId) {
     // One drawable set for a whole changeset, with shared fetches: node
     // coordinates for all changed ways are fetched once (batched), and
-    // each external relation member way is fetched once, capped at 200.
+    // each external relation member way is fetched once per side, capped
+    // at 200.
     // cache persists across overview refreshes (lazy old versions arriving
     // later), so a refresh only fetches coordinates it has not seen yet.
-    cache = cache || { coords: new Map(), external: new Map() };
+    // Coordinates are per side and temporal: old = as of before the
+    // changeset (exclusive bound), new = as of the changeset (inclusive
+    // bound). Without a changeset id the maps draw nothing rather than
+    // today's geometry.
+    const csNum = changesetId == null ? null : parseInt(changesetId, 10);
+    const oldBound = csNum == null || !Number.isFinite(csNum) ? null : { changeset: csNum, inclusive: false };
+    const newBound = csNum == null || !Number.isFinite(csNum) ? null : { changeset: csNum, inclusive: true };
+    cache = cache || { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
+    const budget = { remaining: 1000 };
     // pairs: {action, oldObj, newObj}; oldObj is null when the previous
     // version was not fetched (large changeset) and newObj is null for
     // deletes. In that no-old case the new state draws as "added".
@@ -1146,23 +1155,28 @@ if (typeof document !== "undefined") {
       if (p.newObj && p.newObj.type === "way") { newWayRefs.set(p.newObj.id, p.newObj.nodeRefs || []); nodeIds.push(...(p.newObj.nodeRefs || [])); pairIndexByWayId.set(p.newObj.id, pi); }
       if (p.oldObj && p.oldObj.type === "way") { oldWayRefs.set(p.oldObj.id, p.oldObj.nodeRefs || []); nodeIds.push(...(p.oldObj.nodeRefs || [])); pairIndexByWayId.set(p.oldObj.id, pi); }
     }
-    const missingIds = [...new Set(nodeIds)].filter((id) => !cache.coords.has(id));
-    if (missingIds.length) {
-      const fresh = await fetchNodeCoords(missingIds);
-      for (const [k, v] of fresh) cache.coords.set(k, v);
-    }
-    await fillMissingNodeCoords(cache.coords, nodeIds);
-    const coords = cache.coords;
-    const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
+    const fillSide = async (cacheMap, bound, ids) => {
+      const missing = [...new Set(ids || [])].filter((id) => !cacheMap.has(id));
+      if (!missing.length || !bound) return;
+      const currentMap = await fetchNodeCoordsWithChangesets(missing);
+      const resolved = await resolveCoordsAtBound(missing, currentMap, bound, budget);
+      for (const [k, v] of resolved) cacheMap.set(k, v);
+    };
+    await fillSide(cache.coordsOld, oldBound, nodeIds);
+    await fillSide(cache.coordsNew, newBound, nodeIds);
+    const lineOld = (refs) => (refs || []).map((r) => cache.coordsOld.get(r)).filter(hasCoords);
+    const lineNew = (refs) => (refs || []).map((r) => cache.coordsNew.get(r)).filter(hasCoords);
     // Segment-level way diff: drawing the whole old way red and the
     // whole new way green on top of each other hides the red under the
     // green wherever the geometry did not change, so the way looks
     // entirely changed. Instead, match consecutive node pairs (as a
     // multiset, so a segment used twice counts twice): segments in
     // both are unchanged grey, segments only in the old are removed
-    // red, segments only in the new are added green.
+    // red, segments only in the new are added green. Old and new
+    // segments use their own side's coordinates, so a node moved by
+    // the changeset draws as removed + added.
     const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
-    const waySegments = (refs) => {
+    const waySegments = (refs, coords) => {
       const segs = [];
       for (let k = 0; k + 1 < (refs || []).length; k++) {
         const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
@@ -1171,7 +1185,7 @@ if (typeof document !== "undefined") {
       return segs;
     };
     const pushWaySegmentDiff = (oldRefs, newRefs, obj, target) => {
-      const oldSegs = waySegments(oldRefs), newSegs = waySegments(newRefs);
+      const oldSegs = waySegments(oldRefs, cache.coordsOld), newSegs = waySegments(newRefs, cache.coordsNew);
       const newCounts = new Map();
       for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
       const matched = new Map();
@@ -1193,26 +1207,32 @@ if (typeof document !== "undefined") {
       }
     }
     const truncated = externalIds.length > 200;
-    const externalGeom = cache.external;
+    const extRefsOld = new Map(), extRefsNew = new Map();
     for (const wid of externalIds.slice(0, 200)) {
-      if (externalGeom.has(wid)) continue;
-      try {
-        const wfull = await fetchObjectFull("way", wid);
-        const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
-        if (pts.length >= 2) externalGeom.set(wid, pts);
-      } catch (e) {
-        // Deleted external way: draw its last-known geometry instead
-        // of dropping it.
-        try {
-          const pts = await fetchDeletedWayPts(wid);
-          if (pts) externalGeom.set(wid, pts);
-        } catch (e2) { /* skip unfetchable way */ }
+      if (!cache.externalOld.has(wid)) {
+        const refs = await fetchWayRefsAtBound(wid, oldBound, budget);
+        if (refs) extRefsOld.set(wid, refs);
       }
+      if (!cache.externalNew.has(wid)) {
+        const refs = await fetchWayRefsAtBound(wid, newBound, budget);
+        if (refs) extRefsNew.set(wid, refs);
+      }
+    }
+    const extNodeIds = [...new Set([...extRefsOld.values(), ...extRefsNew.values()].flat())];
+    await fillSide(cache.coordsOld, oldBound, extNodeIds);
+    await fillSide(cache.coordsNew, newBound, extNodeIds);
+    for (const [wid, refs] of extRefsOld) {
+      const pts = refs.map((r) => cache.coordsOld.get(r)).filter(hasCoords);
+      if (pts.length >= 2) cache.externalOld.set(wid, pts);
+    }
+    for (const [wid, refs] of extRefsNew) {
+      const pts = refs.map((r) => cache.coordsNew.get(r)).filter(hasCoords);
+      if (pts.length >= 2) cache.externalNew.set(wid, pts);
     }
     const memberPts = (m, which) => {
       const refs = which === "old" ? oldWayRefs.get(m.ref) : newWayRefs.get(m.ref);
-      if (refs) return line(refs);
-      return externalGeom.get(m.ref) || null;
+      if (refs) return (which === "old" ? lineOld : lineNew)(refs);
+      return (which === "old" ? cache.externalOld : cache.externalNew).get(m.ref) || null;
     };
     // Every drawable carries its object and its card target, so a click
     // on the map can say what it is and scroll to its card. A member way
@@ -1238,13 +1258,13 @@ if (typeof document !== "undefined") {
         const o = p.newObj;
         if (!o) continue;
         if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }], obj: { type: o.type, id: o.id }, target: pi });
-        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj: { type: o.type, id: o.id }, target: pi }); }
+        else if (o.type === "way") { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj: { type: o.type, id: o.id }, target: pi }); }
         else if (o.type === "relation") pushWayMembers(o.members, "new", "added", pi, o.id);
       } else if (p.action === "delete") {
         const o = p.oldObj;
         if (!o) continue;
         if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "removed", pts: [{ lat: o.lat, lon: o.lon }], obj: { type: o.type, id: o.id }, target: pi });
-        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts, obj: { type: o.type, id: o.id }, target: pi }); }
+        else if (o.type === "way") { const pts = lineOld(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts, obj: { type: o.type, id: o.id }, target: pi }); }
         else if (o.type === "relation") pushWayMembers(o.members, "old", "removed", pi, o.id);
       } else {
         // modify
@@ -1261,10 +1281,10 @@ if (typeof document !== "undefined") {
             drawables.push({ kind: "new", pts: [np], obj, target: pi });
           } else drawables.push({ kind: "unchanged", pts: [{ lat: o.lat, lon: o.lon }], obj, target: pi });
         } else if (o.type === "way") {
-          if (!old) { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj, target: pi }); }
+          if (!old) { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj, target: pi }); }
           else if (JSON.stringify(old.nodeRefs || null) !== JSON.stringify(o.nodeRefs || null)) {
             pushWaySegmentDiff(old.nodeRefs, o.nodeRefs, obj, pi);
-          } else { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
+          } else { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
         } else if (o.type === "relation") {
           const oldMembers = (old && old.members) || [];
           const newMembers = o.members || [];
@@ -1339,7 +1359,7 @@ if (typeof document !== "undefined") {
     }
     return bounds;
   }
-  function buildOverviewMapView(pairs, cache, getCard) {
+  function buildOverviewMapView(pairs, cache, getCard, changesetId) {
     const div = document.createElement("div");
     div.className = "panel";
     div.appendChild(el("p", "Loading overview map…", "muted"));
@@ -1372,7 +1392,7 @@ if (typeof document !== "undefined") {
       if (loading) { queued = true; return; }
       loading = true;
       try {
-        const { drawables, truncated } = await collectOverviewDrawables(pairs, cache);
+        const { drawables, truncated } = await collectOverviewDrawables(pairs, cache, changesetId);
         if (!drawables.length) {
           if (!mapState) { div.innerHTML = ""; div.appendChild(el("p", "No drawable geometry for this changeset.", "muted")); }
         } else if (!mapState) {
@@ -2129,8 +2149,8 @@ if (typeof document !== "undefined") {
         }));
         const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldPending, id));
         // Overview map between the changeset description and the cards.
-        const overviewCache = { coords: new Map(), external: new Map() };
-        const overview = buildOverviewMapView(pairs, overviewCache, (i) => cards[i]);
+        const overviewCache = { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
+        const overview = buildOverviewMapView(pairs, overviewCache, (i) => cards[i], id);
         $("preview").appendChild(overview);
         // Cards grouped by object type, each group collapsible (expanded
         // by default, like the Tags/Members sections inside a card).
