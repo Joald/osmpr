@@ -194,7 +194,7 @@
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
-    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed). Member way geometry and node positions on the map are current, not as of the selected version; node positions are exact.</li>
+    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed).</li>
   </ul>
   <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
   <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
@@ -1024,7 +1024,6 @@ if (typeof document !== "undefined") {
     if (!bounds.length) { div.innerHTML = ""; div.appendChild(el("p", emptyText, "muted")); return; }
     map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
     map.invalidateSize();
-    div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
   }
   function buildMapView(oldObj, newObj) {
     const div = document.createElement("div");
@@ -1306,7 +1305,6 @@ if (typeof document !== "undefined") {
           if (bounds.length) {
             map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
             map.invalidateSize();
-            div.appendChild(el("p", "Gray: unchanged · Green: new / added · Red: old / removed", "muted small"));
             mapState = { map, layers, note: null };
             if (truncated) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
           } else {
@@ -1990,7 +1988,6 @@ if (typeof document !== "undefined") {
       mapView.hidden = false;
       mapWrap.appendChild(mapView);
       mapView.load();
-      if (cur.type !== "node") mapWrap.appendChild(el("p", "Map draws member way geometry and node positions as they are today, not as of this version.", "muted small"));
     }
     renderList();
     renderDetail();
