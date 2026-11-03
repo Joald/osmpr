@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -272,5 +272,16 @@ const w1 = { type: "way", id: 900200, version: 1, tags: {}, nodeRefs: [11, 22], 
 const w2 = { ...w1, version: 2, nodeRefs: [11, 22, 33] };
 assert.equal(historyChangeSummary(w1, w2).geometryChanged, true);
 assert.equal(historyChangeSummary(w1, { ...w1, version: 2 }).geometryChanged, false);
+
+// --- unified header field (Go) ---
+assert.deepEqual(parseGoInput("https://www.openstreetmap.org/changeset/181933730", "relation"), { view: "changeset", id: "181933730" });
+assert.deepEqual(parseGoInput("https://www.openstreetmap.org/relation/2402490", "changeset"), { view: "history", type: "relation", id: 2402490 });
+assert.deepEqual(parseGoInput("relation:2402490", "changeset"), { view: "history", type: "relation", id: 2402490 });
+assert.deepEqual(parseGoInput("2402490", "relation"), { view: "history", type: "relation", id: 2402490 });
+assert.deepEqual(parseGoInput("181933730", "changeset"), { view: "changeset", id: "181933730" });
+assert.deepEqual(parseGoInput("2402490", "node"), { view: "history", type: "node", id: 2402490 });
+assert.equal(parseGoInput("garbage", "relation"), null);
+assert.equal(parseGoInput("", "relation"), null);
+assert.equal(parseGoInput("2402490", "bogus"), null);
 
 console.log("All editor logic tests passed.");

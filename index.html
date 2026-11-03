@@ -59,10 +59,10 @@
   @media (max-width: 640px) {
     /* Mobile header: buttons first, search bar on its own line below. */
     #headerSpacer { display: none; }
-    #csViewInput { order: 10; flex: 1 1 100%; }
-    #histViewInput { order: 11; flex: 1 1 100%; }
+    #goInput { order: 10; flex: 1 1 100%; }
   }
   button, input[type="text"], textarea { font: inherit; }
+  select { background: #121417; color: #e8e8e8; border: 1px solid #3a3f44; border-radius: 8px; padding: 8px 10px; font: inherit; }
   button { background: #2b6cb0; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
   button:hover { background: #2f7ac4; }
   button:disabled { background: #3a3f44; color: #9aa0a6; cursor: not-allowed; }
@@ -129,10 +129,14 @@
   <div class="row">
     <h1 style="margin:0">OSMPR</h1>
     <span id="headerSpacer" style="flex:1"></span>
-    <input id="csViewInput" type="text" placeholder="Changeset id or URL" style="width:170px">
-    <button id="csViewBtn" type="button" class="secondary">View</button>
-    <input id="histViewInput" type="text" placeholder="Object history: type:id or OSM URL" style="width:200px">
-    <button id="histViewBtn" type="button" class="secondary">History</button>
+    <input id="goInput" type="text" placeholder="Id, type:id, or OSM URL" style="width:200px">
+    <select id="goType">
+      <option value="changeset">Changeset</option>
+      <option value="node">Node</option>
+      <option value="way">Way</option>
+      <option value="relation">Relation</option>
+    </select>
+    <button id="goBtn" type="button">Go</button>
     <span id="authStatus" class="muted small" style="text-align:right">Checking login…</span>
     <button id="loginBtn" type="button">Log in with OSM</button>
     <button id="logoutBtn" type="button" class="secondary">Log out</button>
@@ -190,7 +194,7 @@
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
-    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click History. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed). Member way geometry and node positions on the map are current, not as of the selected version; node positions are exact.</li>
+    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed). Member way geometry and node positions on the map are current, not as of the selected version; node positions are exact.</li>
   </ul>
   <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
   <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
@@ -294,6 +298,22 @@ function parseHistoryInput(text) {
   const m = s.match(/openstreetmap\.org\/(node|way|relation)\/(\d+)/);
   if (m) return { type: m[1], id: parseInt(m[2], 10) };
   return parseHistorySpec(s);
+}
+function parseGoInput(text, selectedType) {
+  // Unified header field: an OSM URL, "type:id", or a bare id combined
+  // with the type dropdown. Returns {view, ...} or null.
+  const s = String(text || "").trim();
+  if (!s) return null;
+  const csUrl = s.match(/changeset\/(\d+)/);
+  if (csUrl) return { view: "changeset", id: csUrl[1] };
+  const hist = parseHistoryInput(s);
+  if (hist) return { view: "history", type: hist.type, id: hist.id };
+  if (/^\d+$/.test(s)) {
+    if (selectedType === "changeset") return { view: "changeset", id: s };
+    const type = normType(selectedType);
+    if (type) return { view: "history", type, id: parseInt(s, 10) };
+  }
+  return null;
 }
 function normalizeHistoryElement(e) {
   // One element of GET /{type}/{id}/history.json -> the internal object
@@ -1732,12 +1752,6 @@ if (typeof document !== "undefined") {
       updateUploadButton();
     }
   }
-  function parseChangesetInput(s) {
-    const t = String(s || "").trim();
-    if (/^\d+$/.test(t)) return t;
-    const m = t.match(/changeset\/(\d+)/);
-    return m ? m[1] : null;
-  }
   function parseDownloadXml(xmlText) {
     const doc = new DOMParser().parseFromString(xmlText, "text/xml");
     const out = [];
@@ -2112,17 +2126,16 @@ if (typeof document !== "undefined") {
       a.click();
       URL.revokeObjectURL(a.href);
     });
-    $("csViewBtn").addEventListener("click", () => {
-      const id = parseChangesetInput($("csViewInput").value);
-      if (!id) { log("Enter a changeset id or URL.", "note"); return; }
-      history.replaceState(null, "", "?changeset=" + id);
-      loadChangesetView(id);
-    });
-    $("histViewBtn").addEventListener("click", () => {
-      const hist = parseHistoryInput($("histViewInput").value);
-      if (!hist) { log("Enter an object as type:id (e.g. relation:2402490) or an OSM object URL.", "note"); return; }
-      history.replaceState(null, "", "?history=" + hist.type + ":" + hist.id);
-      loadHistoryView(hist.type, hist.id);
+    $("goBtn").addEventListener("click", () => {
+      const go = parseGoInput($("goInput").value, $("goType").value);
+      if (!go) { log("Enter an id, type:id (e.g. relation:2402490), or an OSM URL.", "note"); return; }
+      if (go.view === "changeset") {
+        history.replaceState(null, "", "?changeset=" + go.id);
+        loadChangesetView(go.id);
+      } else {
+        history.replaceState(null, "", "?history=" + go.type + ":" + go.id);
+        loadHistoryView(go.type, go.id);
+      }
     });
     const histParam = new URLSearchParams(location.search).get("history");
     if (histParam) {
