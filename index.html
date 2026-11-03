@@ -60,6 +60,7 @@
     /* Mobile header: buttons first, search bar on its own line below. */
     #headerSpacer { display: none; }
     #csViewInput { order: 10; flex: 1 1 100%; }
+    #histViewInput { order: 11; flex: 1 1 100%; }
   }
   button, input[type="text"], textarea { font: inherit; }
   button { background: #2b6cb0; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
@@ -71,6 +72,9 @@
   textarea { background: #121417; color: #e8e8e8; border: 1px solid #3a3f44; border-radius: 8px; padding: 8px 10px; width: 100%; }
   .obj { background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
   .obj h3 { margin-top: 0; }
+  .hist-version { cursor: pointer; padding: 6px 10px; border-radius: 8px; }
+  .hist-version:hover { background: #23272c; }
+  .hist-selected { background: #2a2e33; }
   ul.diff { list-style: none; padding: 0; margin: 6px 0; }
   ul.diff li { padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
   .add { color: #7ee787; }
@@ -129,6 +133,8 @@
     <span id="headerSpacer" style="flex:1"></span>
     <input id="csViewInput" type="text" placeholder="Changeset id or URL" style="width:170px">
     <button id="csViewBtn" type="button" class="secondary">View</button>
+    <input id="histViewInput" type="text" placeholder="Object history: type:id or OSM URL" style="width:200px">
+    <button id="histViewBtn" type="button" class="secondary">History</button>
     <span id="authStatus" class="muted small" style="text-align:right">Checking login…</span>
     <button id="loginBtn" type="button">Log in with OSM</button>
     <button id="logoutBtn" type="button" class="secondary">Log out</button>
@@ -186,6 +192,7 @@
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
+    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click History. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed). Member way geometry and node positions on the map are current, not as of the selected version; node positions are exact.</li>
   </ul>
   <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
   <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
@@ -271,6 +278,49 @@ function parsePrefill(search) {
     return { comment: params.get("comment") || "", changes: [{ type: "relation", id, version: v ? parseInt(v, 10) : null, add, remove, tags: {}, lat: null, lon: null, nodes: null }] };
   }
   return null;
+}
+function parseHistorySpec(spec) {
+  // "relation:2402490" | "r:2402490" -> {type, id} | null. Used for the
+  // ?history= URL parameter.
+  const parts = String(spec || "").trim().split(":");
+  if (parts.length !== 2) return null;
+  const type = normType(parts[0]);
+  const id = parseInt(parts[1], 10);
+  if (!type || !Number.isFinite(id) || id <= 0) return null;
+  return { type, id };
+}
+function parseHistoryInput(text) {
+  // Header input: "relation:2402490", "r:2402490", or an OSM object URL.
+  const s = String(text || "").trim();
+  if (!s) return null;
+  const m = s.match(/openstreetmap\.org\/(node|way|relation)\/(\d+)/);
+  if (m) return { type: m[1], id: parseInt(m[2], 10) };
+  return parseHistorySpec(s);
+}
+function normalizeHistoryElement(e) {
+  // One element of GET /{type}/{id}/history.json -> the internal object
+  // shape used by the map/diff code (members, nodeRefs, lat/lon).
+  if (!e || !e.type || !Number.isFinite(e.id) || !Number.isFinite(e.version)) return null;
+  return {
+    type: e.type, id: e.id, version: e.version,
+    changeset: e.changeset ?? null, timestamp: e.timestamp || null, user: e.user || null,
+    visible: e.visible !== false, tags: e.tags || {},
+    members: (e.members || []).map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" })),
+    nodeRefs: Array.isArray(e.nodes) ? e.nodes : null,
+    lat: e.lat ?? null, lon: e.lon ?? null,
+  };
+}
+function historyChangeSummary(prev, cur) {
+  // Kind of change one version makes over the previous one. prev null =>
+  // the object was created; cur invisible => the object was deleted.
+  if (!prev) return { kind: "created" };
+  if (!cur.visible) return { kind: "deleted" };
+  const dm = cur.type === "relation" ? diffMembers(prev.members || [], cur.members || []) : { added: [], removed: [] };
+  const dt = diffTags(prev.tags || {}, cur.tags || {});
+  let geometryChanged = false;
+  if (cur.type === "node") geometryChanged = prev.lat !== cur.lat || prev.lon !== cur.lon;
+  else if (cur.type === "way") geometryChanged = JSON.stringify(prev.nodeRefs) !== JSON.stringify(cur.nodeRefs);
+  return { kind: "changed", addedMembers: dm.added.length, removedMembers: dm.removed.length, tagChanges: dt.length, geometryChanged };
 }
 function applyOps(current, ops) {
   const notes = [];
@@ -482,7 +532,7 @@ if (typeof document !== "undefined") {
   // (new objects) on the relation map before they exist on OSM.
   let prefillComputed = new Map();
   let openChangesetId = null;
-  let viewMode = "prefill"; // "prefill" | "changeset"
+  let viewMode = "prefill"; // "prefill" | "changeset" | "history"
 
   // No visible log panel: diagnostics go to the console only.
   function log(msg, cls) {
@@ -1319,7 +1369,7 @@ if (typeof document !== "undefined") {
     updateUploadButton();
   }
   function updateUploadButton() {
-    $("submitPanel").hidden = (viewMode === "changeset");
+    $("submitPanel").hidden = (viewMode === "changeset" || viewMode === "history");
     if (viewMode === "changeset") return;
     const anyChanged = items.some((it) => it.computed && it.computed.changed && !it.conflict && !it.error);
     const anyConflict = items.some((it) => it.conflict);
@@ -1729,6 +1779,163 @@ if (typeof document !== "undefined") {
     card.appendChild(mapView);
     return card;
   }
+  async function loadHistoryView(type, id) {
+    // Object history across changesets: version timeline, per-version
+    // changes, and a map of the selected version against the previous one
+    // (gray unchanged, green added, red removed). Entry: ?history=type:id
+    // or the header History input. Read-only: no upload, no auth needed.
+    viewMode = "history";
+    $("submitPanel").hidden = true;
+    const vh = $("viewHeader");
+    vh.innerHTML = "";
+    vh.appendChild(document.createTextNode("History of " + type + " "));
+    vh.appendChild(osmLink(type, id));
+    vh.hidden = false;
+    const preview = $("preview");
+    preview.innerHTML = "";
+    preview.appendChild(el("p", "Loading history…", "muted"));
+    let versions;
+    try {
+      const res = await fetch(API_BASE + "/" + type + "/" + id + "/history.json");
+      if (!res.ok) throw new Error("History fetch failed (" + res.status + ") for " + type + " " + id + ".");
+      const data = await res.json();
+      versions = (data.elements || []).map(normalizeHistoryElement).filter(Boolean);
+    } catch (e) {
+      preview.innerHTML = "";
+      preview.appendChild(el("p", "Error loading history: " + e.message, "del"));
+      return;
+    }
+    versions.sort((a, b) => a.version - b.version);
+    if (!versions.length) {
+      preview.innerHTML = "";
+      preview.appendChild(el("p", "No versions found for this object.", "muted"));
+      return;
+    }
+    const latest = versions[versions.length - 1];
+    preview.innerHTML = "";
+    const title = el("p", null, "muted");
+    title.appendChild(displayNameEl(type, id, latest.tags && latest.tags.name));
+    title.appendChild(document.createTextNode(" - " + versions.length + " version" + (versions.length === 1 ? "" : "s") + (latest.visible ? "" : " (currently deleted)") + ". Click a version to see its changes and map."));
+    preview.appendChild(title);
+    let selected = versions.length - 1;
+    const listWrap = document.createElement("div");
+    const detailWrap = document.createElement("div");
+    const mapWrap = document.createElement("div");
+    preview.appendChild(listWrap);
+    preview.appendChild(detailWrap);
+    preview.appendChild(mapWrap);
+    function fmtDate(ts) { return (ts || "").slice(0, 10); }
+    function changesetLink(cs) {
+      if (!cs) return document.createTextNode("(no changeset)");
+      const a = document.createElement("a");
+      a.href = "?changeset=" + cs;
+      a.textContent = cs;
+      return a;
+    }
+    function summaryText(i) {
+      const s = historyChangeSummary(i > 0 ? versions[i - 1] : null, versions[i]);
+      if (s.kind === "created") return "created";
+      if (s.kind === "deleted") return "deleted";
+      const parts = [];
+      if (s.addedMembers) parts.push("+" + s.addedMembers + " members");
+      if (s.removedMembers) parts.push("-" + s.removedMembers + " members");
+      if (s.tagChanges) parts.push(s.tagChanges + " tag" + (s.tagChanges === 1 ? "" : "s"));
+      if (s.geometryChanged) parts.push("geometry changed");
+      return parts.length ? parts.join(", ") : "no change";
+    }
+    function renderList() {
+      listWrap.innerHTML = "";
+      const ul = el("ul", null, "diff");
+      for (let i = versions.length - 1; i >= 0; i--) {
+        const v = versions[i];
+        const li = document.createElement("li");
+        li.className = "hist-version" + (i === selected ? " hist-selected" : "");
+        li.appendChild(document.createTextNode("v" + v.version + " | " + fmtDate(v.timestamp) + " | " + (v.user || "?") + " | changeset "));
+        li.appendChild(changesetLink(v.changeset));
+        li.appendChild(document.createTextNode(" | " + summaryText(i) + (v.visible ? "" : " (deleted)")));
+        li.addEventListener("click", () => { selected = i; renderList(); renderDetail(); });
+        ul.appendChild(li);
+      }
+      listWrap.appendChild(ul);
+    }
+    function emptyObjFor(v) { return { type: v.type, id: v.id, members: [], nodeRefs: [], lat: null, lon: null }; }
+    function renderDetail() {
+      detailWrap.innerHTML = "";
+      mapWrap.innerHTML = "";
+      const cur = versions[selected];
+      const prev = selected > 0 ? versions[selected - 1] : null;
+      const card = el("div", null, "obj");
+      const h = el("h3", null);
+      h.appendChild(document.createTextNode("Version " + cur.version + " | " + fmtDate(cur.timestamp) + " | " + (cur.user || "?") + " | changeset "));
+      h.appendChild(changesetLink(cur.changeset));
+      card.appendChild(h);
+      const nav = el("div", null, "row");
+      const prevBtn = el("button", "Previous version", "secondary"); prevBtn.type = "button";
+      const nextBtn = el("button", "Next version", "secondary"); nextBtn.type = "button";
+      prevBtn.disabled = selected <= 0;
+      nextBtn.disabled = selected >= versions.length - 1;
+      prevBtn.addEventListener("click", () => { selected--; renderList(); renderDetail(); });
+      nextBtn.addEventListener("click", () => { selected++; renderList(); renderDetail(); });
+      nav.appendChild(prevBtn);
+      nav.appendChild(nextBtn);
+      card.appendChild(nav);
+      if (!cur.visible) card.appendChild(el("p", "This version deleted the object.", "del"));
+      const s = historyChangeSummary(prev, cur);
+      const ch = document.createElement("div");
+      if (s.kind === "created") ch.appendChild(el("p", "Object created in this version.", "muted"));
+      else if (s.kind === "deleted") {
+        const ul = el("ul", null, "diff");
+        for (const m of prev.members || []) ul.appendChild(memberLi("-", m, "del"));
+        if (!ul.children.length) ul.appendChild(el("li", "No members.", "muted"));
+        ch.appendChild(ul);
+      } else {
+        const dm = cur.type === "relation" ? diffMembers(prev.members || [], cur.members || []) : { added: [], removed: [] };
+        const dt = diffTags(prev.tags || {}, cur.tags || {});
+        const ul = el("ul", null, "diff");
+        for (const m of dm.added) ul.appendChild(memberLi("+", m, "add"));
+        for (const m of dm.removed) ul.appendChild(memberLi("-", m, "del"));
+        for (const t of dt) ul.appendChild(tagChangeLi(t));
+        if (!ul.children.length && !s.geometryChanged) ul.appendChild(el("li", "No member or tag changes.", "muted"));
+        ch.appendChild(ul);
+        const gp = geometryPreview(prev, cur);
+        if (gp) ch.appendChild(gp);
+      }
+      card.appendChild(section("Changes in this version:", [ch]));
+      const state = document.createElement("div");
+      const tagUl = el("ul", null, "diff");
+      for (const k of Object.keys(cur.tags || {}).sort()) {
+        const li = document.createElement("li");
+        li.appendChild(document.createTextNode(k + " = " + cur.tags[k]));
+        tagUl.appendChild(li);
+      }
+      if (!tagUl.children.length) tagUl.appendChild(el("li", "No tags.", "muted"));
+      state.appendChild(tagUl);
+      if (cur.type === "relation") {
+        const mUl = el("ul", null, "diff");
+        for (const m of cur.members || []) mUl.appendChild(memberLi("", m, null));
+        if (!mUl.children.length) mUl.appendChild(el("li", "No members.", "muted"));
+        state.appendChild(mUl);
+      } else if (cur.type === "way") {
+        state.appendChild(el("p", "Nodes: " + (cur.nodeRefs || []).length, "muted"));
+      } else if (cur.type === "node") {
+        state.appendChild(el("p", "Position: " + cur.lat + ", " + cur.lon, "muted"));
+      }
+      card.appendChild(section("State in this version:", [state]));
+      detailWrap.appendChild(card);
+      // Map: selected version against the previous one (all added for v1,
+      // all removed for a delete). Member way geometry and node positions
+      // are current, not as of this version; node positions are exact.
+      const oldObj = !prev ? emptyObjFor(cur) : prev;
+      const newObj = cur.visible ? cur : emptyObjFor(cur);
+      const mapView = buildMapView(oldObj, newObj);
+      mapView.hidden = false;
+      mapWrap.appendChild(mapView);
+      mapView.load();
+      if (cur.type !== "node") mapWrap.appendChild(el("p", "Map draws member way geometry and node positions as they are today, not as of this version.", "muted small"));
+    }
+    renderList();
+    renderDetail();
+  }
   async function loadChangesetView(id) {
     viewMode = "changeset";
     $("oscPreview").hidden = true;
@@ -1866,6 +2073,17 @@ if (typeof document !== "undefined") {
       history.replaceState(null, "", "?changeset=" + id);
       loadChangesetView(id);
     });
+    $("histViewBtn").addEventListener("click", () => {
+      const hist = parseHistoryInput($("histViewInput").value);
+      if (!hist) { log("Enter an object as type:id (e.g. relation:2402490) or an OSM object URL.", "note"); return; }
+      history.replaceState(null, "", "?history=" + hist.type + ":" + hist.id);
+      loadHistoryView(hist.type, hist.id);
+    });
+    const histParam = new URLSearchParams(location.search).get("history");
+    if (histParam) {
+      const hist = parseHistorySpec(histParam);
+      if (hist) { loadHistoryView(hist.type, hist.id); return; }
+    }
     const csParam = new URLSearchParams(location.search).get("changeset");
     if (csParam && /^\d+$/.test(csParam)) {
       loadChangesetView(csParam);

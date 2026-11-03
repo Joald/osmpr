@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -223,5 +223,54 @@ assert.equal(wayDl.geometryLines[3].kind, "same"); assert.equal(wayDl.geometryLi
 assert.equal(wayDl.geometryLines[4].kind, "del"); assert.equal(wayDl.geometryLines[4].ref, 22); assert.equal(wayDl.geometryLines[4].oldNo, 2);
 const relDl = buildDiffLines({}, [], {}, [], { type: "relation" }, { type: "relation" });
 assert.equal(relDl.geometryLines.length, 0, "relations carry geometry in members, not a Geometry section");
+
+// --- object history (?history=) ---
+assert.deepEqual(parseHistorySpec("relation:2402490"), { type: "relation", id: 2402490 });
+assert.deepEqual(parseHistorySpec("r:2402490"), { type: "relation", id: 2402490 });
+assert.deepEqual(parseHistorySpec("rel:2402490"), { type: "relation", id: 2402490 });
+assert.deepEqual(parseHistorySpec("w:123"), { type: "way", id: 123 });
+assert.deepEqual(parseHistorySpec("node:456"), { type: "node", id: 456 });
+assert.equal(parseHistorySpec("x:1"), null);
+assert.equal(parseHistorySpec("relation:abc"), null);
+assert.equal(parseHistorySpec("2402490"), null);
+assert.equal(parseHistorySpec("relation:0"), null);
+assert.equal(parseHistorySpec("relation:1:extra"), null);
+assert.deepEqual(parseHistorySpec(" relation:2402490 "), { type: "relation", id: 2402490 });
+assert.deepEqual(parseHistoryInput("https://www.openstreetmap.org/relation/2402490"), { type: "relation", id: 2402490 });
+assert.deepEqual(parseHistoryInput("https://www.openstreetmap.org/way/123"), { type: "way", id: 123 });
+assert.deepEqual(parseHistoryInput("n:789"), { type: "node", id: 789 });
+assert.equal(parseHistoryInput(""), null);
+assert.equal(parseHistoryInput("garbage"), null);
+
+const histRel = normalizeHistoryElement({ type: "relation", id: 900001, version: 14, changeset: 181933730, timestamp: "2026-04-28T10:46:29Z", user: "raphaelmirc", visible: true, tags: { name: "Santa Matilde" }, members: [{ type: "way", ref: 11, role: "outer" }, { type: "node", ref: 22 }] });
+assert.equal(histRel.members.length, 2);
+assert.equal(histRel.members[1].role, "");
+assert.equal(histRel.nodeRefs, null);
+const histWay = normalizeHistoryElement({ type: "way", id: 900200, version: 3, changeset: 1, timestamp: "2026-01-01T00:00:00Z", user: "u", visible: true, tags: {}, nodes: [11, 22, 33] });
+assert.deepEqual(histWay.nodeRefs, [11, 22, 33]);
+const histNode = normalizeHistoryElement({ type: "node", id: 900100, version: 2, changeset: 1, timestamp: "2026-01-01T00:00:00Z", user: "u", visible: true, tags: {}, lat: 51.5, lon: -0.1 });
+assert.equal(histNode.lat, 51.5);
+const histDel = normalizeHistoryElement({ type: "relation", id: 900001, version: 15, changeset: 2, timestamp: "2026-01-02T00:00:00Z", user: "u", visible: false, tags: {}, members: [] });
+assert.equal(histDel.visible, false);
+assert.equal(normalizeHistoryElement({ type: "relation", id: 1 }), null);
+
+const v1 = { type: "relation", id: 900001, version: 1, tags: { name: "A" }, members: [member("way", 11, "outer")], visible: true };
+const v2 = { type: "relation", id: 900001, version: 2, tags: { name: "B" }, members: [member("way", 11, "outer"), member("way", 12, "outer")], visible: true };
+assert.deepEqual(historyChangeSummary(null, v1), { kind: "created" });
+const s2 = historyChangeSummary(v1, v2);
+assert.equal(s2.kind, "changed");
+assert.equal(s2.addedMembers, 1);
+assert.equal(s2.removedMembers, 0);
+assert.equal(s2.tagChanges, 1);
+assert.equal(s2.geometryChanged, false);
+const vDel = { ...v2, version: 3, visible: false };
+assert.deepEqual(historyChangeSummary(v2, vDel), { kind: "deleted" });
+const n1 = { type: "node", id: 900100, version: 1, tags: {}, lat: 51.5, lon: -0.1, visible: true };
+const n2 = { ...n1, version: 2, lat: 51.6 };
+assert.equal(historyChangeSummary(n1, n2).geometryChanged, true);
+const w1 = { type: "way", id: 900200, version: 1, tags: {}, nodeRefs: [11, 22], visible: true };
+const w2 = { ...w1, version: 2, nodeRefs: [11, 22, 33] };
+assert.equal(historyChangeSummary(w1, w2).geometryChanged, true);
+assert.equal(historyChangeSummary(w1, { ...w1, version: 2 }).geometryChanged, false);
 
 console.log("All editor logic tests passed.");
