@@ -328,6 +328,23 @@ function normalizeHistoryElement(e) {
     lat: e.lat ?? null, lon: e.lon ?? null,
   };
 }
+function pickVersionAtChangeset(elements, changeset, inclusive) {
+  // Latest version of an object as of a changeset bound, or null when
+  // the object did not exist then (not yet created, or deleted by then).
+  // History elements arrive version-ascending with ascending changeset
+  // ids, so the first element past the bound ends the scan. A delete
+  // version (visible=false) means "absent", not "last known state".
+  if (!Number.isFinite(changeset)) return null;
+  let best = null;
+  for (const e of elements || []) {
+    const cs = e.changeset;
+    if (!Number.isFinite(cs)) continue;
+    if (inclusive ? cs > changeset : cs >= changeset) break;
+    best = e;
+  }
+  if (!best || best.visible === false) return null;
+  return best;
+}
 function historyChangeSummary(prev, cur) {
   // Kind of change one version makes over the previous one. prev null =>
   // the object was created; cur invisible => the object was deleted.
@@ -821,39 +838,64 @@ if (typeof document !== "undefined") {
     }
     return out;
   }
-  async function lastVisibleHistoryElement(type, id) {
-    // Last non-deleted version of an object from its history. A delete
-    // version carries visible=false and no geometry (no members/nodes),
-    // so "last version" alone is the wrong pick for a deleted object.
+  async function fetchHistoryElements(type, id) {
     const res = await fetch(API_BASE + "/" + type + "/" + id + "/history.json");
-    if (!res.ok) return null;
-    const els = (await res.json()).elements || [];
-    for (let i = els.length - 1; i >= 0; i--) if (els[i].visible !== false) return els[i];
-    return null;
+    if (!res.ok) throw new Error("History fetch failed (" + res.status + ") for " + type + " " + id + ".");
+    return (await res.json()).elements || [];
   }
-  async function fillMissingNodeCoords(coords, refs) {
-    // Nodes deleted since a version was recorded are absent from a
-    // current /nodes.json fetch; fall back to their last non-deleted
-    // history version, capped so one map cannot hammer the API.
-    const missing = (refs || []).filter((r) => !coords.has(r)).slice(0, 100);
-    for (const nid of missing) {
+  function boundOk(cs, bound) {
+    return !!bound && Number.isFinite(cs) && (bound.inclusive ? cs <= bound.changeset : cs < bound.changeset);
+  }
+  async function fetchNodeCoordsWithChangesets(ids) {
+    // Batched current fetch, keeping each node's current changeset so
+    // the temporal resolver can tell untouched nodes (no history call)
+    // from nodes changed or deleted since the bound.
+    const out = new Map();
+    const uniq = [...new Set((ids || []).filter(Number.isInteger))];
+    for (let i = 0; i < uniq.length; i += 100) {
+      const chunk = uniq.slice(i, i + 100);
+      const res = await fetch(API_BASE + "/nodes.json?nodes=" + chunk.join(","));
+      if (!res.ok) throw new Error("Node fetch failed (" + res.status + ")");
+      const data = await res.json();
+      for (const e of data.elements || []) if (e.type === "node" && hasCoords(e)) out.set(e.id, { lat: e.lat, lon: e.lon, changeset: e.changeset });
+    }
+    return out;
+  }
+  async function resolveCoordsAtBound(ids, currentMap, bound, budget) {
+    // Coordinates of nodes as of a changeset bound. Untouched nodes
+    // (current changeset within bound) come from the batched current
+    // fetch; only nodes changed or deleted since need a history call.
+    const out = new Map();
+    if (!bound) return out;
+    for (const nid of [...new Set(ids || [])]) {
+      const cur = currentMap.get(nid);
+      if (cur && boundOk(cur.changeset, bound)) { out.set(nid, { lat: cur.lat, lon: cur.lon }); continue; }
+      if (budget.remaining <= 0) continue;
+      budget.remaining--;
       try {
-        const last = await lastVisibleHistoryElement("node", nid);
-        if (last && hasCoords(last)) coords.set(nid, { lat: last.lat, lon: last.lon });
+        const ver = pickVersionAtChangeset(await fetchHistoryElements("node", nid), bound.changeset, bound.inclusive);
+        if (ver && hasCoords(ver)) out.set(nid, { lat: ver.lat, lon: ver.lon });
       } catch (e) { /* leave missing */ }
     }
+    return out;
   }
-  async function fetchDeletedWayPts(wid) {
-    // Last-known polyline of a deleted way: its last non-deleted
-    // version's nodeRefs + coordinates (current where alive,
-    // last-known where deleted).
-    const last = await lastVisibleHistoryElement("way", wid);
-    const refs = (last && last.nodes) || [];
-    if (refs.length < 2) return null;
-    const coords = await fetchNodeCoords(refs);
-    await fillMissingNodeCoords(coords, refs);
-    const pts = refs.map((r) => coords.get(r)).filter(hasCoords);
-    return pts.length >= 2 ? pts : null;
+  async function fetchWayRefsAtBound(wid, bound, budget) {
+    // Node refs of a way as of a changeset bound: current refs when the
+    // way's current version is within bound, else the history version.
+    if (!bound) return null;
+    try {
+      const res = await fetch(API_BASE + "/way/" + wid + ".json");
+      if (res.ok) {
+        const el = ((await res.json()).elements || [])[0];
+        if (el && Array.isArray(el.nodes) && boundOk(el.changeset, bound)) return el.nodes;
+      }
+    } catch (e) { /* fall through to history */ }
+    if (budget.remaining <= 0) return null;
+    budget.remaining--;
+    try {
+      const ver = pickVersionAtChangeset(await fetchHistoryElements("way", wid), bound.changeset, bound.inclusive);
+      return (ver && ver.nodes) || null;
+    } catch (e) { return null; }
   }
   async function fetchObjectFull(type, id) {
     const res = await fetch(API_BASE + "/" + type + "/" + id + "/full.json");
@@ -868,8 +910,13 @@ if (typeof document !== "undefined") {
     }
     return { members, wayNodes, nodeCoords };
   }
-  async function collectMapDrawables(oldObj, newObj) {
+  async function collectMapDrawables(oldObj, newObj, bounds) {
     // Drawables: {kind, pts: [{lat, lon}]}. kind: unchanged | added | removed | old | new | connector.
+    // bounds null = live preview (prefill cards): geometry comes from
+    // current fetches. bounds {old, new} = version views: every member
+    // way and node resolves as of its side's changeset bound
+    // ({changeset, inclusive}), so the map shows the state at the
+    // moment of the actual changeset, not today's geometry.
     const drawables = [];
     const type = oldObj.type;
     if (type === "node") {
@@ -884,17 +931,29 @@ if (typeof document !== "undefined") {
       else if (!oOk && nOk) drawables.push({ kind: "added", pts: [{ lat: newObj.lat, lon: newObj.lon }] });
       else drawables.push({ kind: "unchanged", pts: [{ lat: oldObj.lat, lon: oldObj.lon }] });
     } else if (type === "way") {
-      const coords = await fetchNodeCoords([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
-      await fillMissingNodeCoords(coords, [...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
-      const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
-      const oPts = line(oldObj.nodeRefs), nPts = line(newObj.nodeRefs);
       const changed = JSON.stringify(oldObj.nodeRefs) !== JSON.stringify(newObj.nodeRefs);
+      let coordsOld, coordsNew;
+      if (!bounds) {
+        const coords = await fetchNodeCoords([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
+        coordsOld = coordsNew = coords;
+      } else {
+        const budget = { remaining: 1000 };
+        const allRefs = [...new Set([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])])];
+        const currentMap = await fetchNodeCoordsWithChangesets(allRefs);
+        coordsOld = await resolveCoordsAtBound(oldObj.nodeRefs || [], currentMap, bounds.old, budget);
+        coordsNew = await resolveCoordsAtBound(newObj.nodeRefs || [], currentMap, bounds.new, budget);
+      }
+      const lineOld = (refs) => (refs || []).map((r) => coordsOld.get(r)).filter(hasCoords);
+      const lineNew = (refs) => (refs || []).map((r) => coordsNew.get(r)).filter(hasCoords);
+      const oPts = lineOld(oldObj.nodeRefs), nPts = lineNew(newObj.nodeRefs);
       if (changed) {
         // Segment-level diff, as in the overview map: full old/new
         // polylines hide the old under the new wherever nothing
-        // changed. Match consecutive node pairs as a multiset.
+        // changed. Match consecutive node pairs as a multiset. Old and
+        // new segments use their own side's coordinates, so a node
+        // moved between the versions draws as removed + added.
         const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
-        const waySegments = (refs) => {
+        const waySegments = (refs, coords) => {
           const segs = [];
           for (let k = 0; k + 1 < (refs || []).length; k++) {
             const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
@@ -902,7 +961,7 @@ if (typeof document !== "undefined") {
           }
           return segs;
         };
-        const oldSegs = waySegments(oldObj.nodeRefs), newSegs = waySegments(newObj.nodeRefs);
+        const oldSegs = waySegments(oldObj.nodeRefs, coordsOld), newSegs = waySegments(newObj.nodeRefs, coordsNew);
         const newCounts = new Map();
         for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
         const matched = new Map();
@@ -916,61 +975,85 @@ if (typeof document !== "undefined") {
         }
       } else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
     } else if (type === "relation") {
-      // A deleted relation has no current full object: the API answers
-      // 410 Gone for /relation/<id>/full.json once the relation is
-      // deleted, which must not fail the whole map. Fall back to the
-      // member ways from oldObj/newObj, fetched individually below; a
-      // member way deleted since is drawn from its last-known geometry.
-      let full = null;
-      try { full = await fetchObjectFull("relation", oldObj.id); } catch (e) { /* deleted relation in changeset view */ }
-      const wayGeom = new Map();
-      if (full) {
-        for (const [wid, refs] of full.wayNodes) {
-          const pts = refs.map((r) => full.nodeCoords.get(r)).filter(hasCoords);
-          if (pts.length >= 2) wayGeom.set(wid, pts);
-        }
-      }
-      // Member ways missing from the current full (added, or removed from
-      // current in changeset view): fetch individually, capped.
-      const missing = [];
-      for (const m of [...(oldObj.members || []), ...(newObj.members || [])]) {
-        if (m.type === "way" && !wayGeom.has(m.ref) && !missing.includes(m.ref)) missing.push(m.ref);
-      }
-      for (const wid of missing.slice(0, 100)) {
-        if (wid < 0) {
-          // Placeholder way from the prefill: resolve its nodes from the
-          // prefill itself, since it does not exist on OSM yet.
-          const pre = prefillComputed.get("way:" + wid);
-          if (pre && pre.nodeRefs) {
-            const coords = await fetchNodeCoords(pre.nodeRefs);
-            const pts = pre.nodeRefs.map((r) => coords.get(r)).filter(hasCoords);
+      const budget = { remaining: 1000 };
+      let geomOld, geomNew;
+      if (!bounds) {
+        // Live preview: current full object plus individually fetched
+        // member ways, as before. A deleted relation has no current
+        // full object (410 Gone), which must not fail the whole map.
+        let full = null;
+        try { full = await fetchObjectFull("relation", oldObj.id); } catch (e) { /* deleted relation */ }
+        const wayGeom = new Map();
+        if (full) {
+          for (const [wid, refs] of full.wayNodes) {
+            const pts = refs.map((r) => full.nodeCoords.get(r)).filter(hasCoords);
             if (pts.length >= 2) wayGeom.set(wid, pts);
           }
-          continue;
         }
-        try {
-          const wfull = await fetchObjectFull("way", wid);
-          const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
-          if (pts.length >= 2) wayGeom.set(wid, pts);
-        } catch (e) {
-          // Deleted member way: draw its last-known geometry instead
-          // of dropping it.
+        // Member ways missing from the current full (added, or removed
+        // from current in changeset view): fetch individually, capped.
+        const missing = [];
+        for (const m of [...(oldObj.members || []), ...(newObj.members || [])]) {
+          if (m.type === "way" && !wayGeom.has(m.ref) && !missing.includes(m.ref)) missing.push(m.ref);
+        }
+        for (const wid of missing.slice(0, 100)) {
+          if (wid < 0) {
+            // Placeholder way from the prefill: resolve its nodes from the
+            // prefill itself, since it does not exist on OSM yet.
+            const pre = prefillComputed.get("way:" + wid);
+            if (pre && pre.nodeRefs) {
+              const coords = await fetchNodeCoords(pre.nodeRefs);
+              const pts = pre.nodeRefs.map((r) => coords.get(r)).filter(hasCoords);
+              if (pts.length >= 2) wayGeom.set(wid, pts);
+            }
+            continue;
+          }
           try {
-            const pts = await fetchDeletedWayPts(wid);
-            if (pts) wayGeom.set(wid, pts);
-          } catch (e2) { /* skip unfetchable way */ }
+            const wfull = await fetchObjectFull("way", wid);
+            const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
+            if (pts.length >= 2) wayGeom.set(wid, pts);
+          } catch (e) { /* skip unfetchable way */ }
         }
+        geomOld = geomNew = wayGeom;
+      } else {
+        // Version views: no current fetch at all. Member way refs and
+        // node coordinates resolve per side as of that side's changeset
+        // bound. Member ways capped at 200 per side, like the overview's
+        // external-way cap.
+        const sideGeom = async (members, bound) => {
+          const geom = new Map();
+          if (!bound) return geom;
+          const ways = [];
+          for (const m of members || []) {
+            if (m.type === "way" && m.ref >= 0 && !ways.includes(m.ref)) ways.push(m.ref);
+          }
+          const refsByWay = new Map();
+          for (const wid of ways.slice(0, 200)) {
+            const refs = await fetchWayRefsAtBound(wid, bound, budget);
+            if (refs) refsByWay.set(wid, refs);
+          }
+          const nodeIds = [...new Set([...refsByWay.values()].flat())];
+          const currentMap = await fetchNodeCoordsWithChangesets(nodeIds);
+          const coords = await resolveCoordsAtBound(nodeIds, currentMap, bound, budget);
+          for (const [wid, refs] of refsByWay) {
+            const pts = refs.map((r) => coords.get(r)).filter(hasCoords);
+            if (pts.length >= 2) geom.set(wid, pts);
+          }
+          return geom;
+        };
+        geomOld = await sideGeom(oldObj.members, bounds.old);
+        geomNew = await sideGeom(newObj.members, bounds.new);
       }
       const oldKeys = new Set((oldObj.members || []).map(memberKey));
       const newKeys = new Set((newObj.members || []).map(memberKey));
-      const pushMember = (m, kind) => {
+      const pushMember = (m, kind, geom) => {
         if (m.type !== "way") return;
-        const pts = wayGeom.get(m.ref);
+        const pts = geom.get(m.ref);
         if (pts) drawables.push({ kind, pts });
       };
-      for (const m of newObj.members || []) if (oldKeys.has(memberKey(m))) pushMember(m, "unchanged");
-      for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m))) pushMember(m, "removed");
-      for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m))) pushMember(m, "added");
+      for (const m of newObj.members || []) if (oldKeys.has(memberKey(m))) pushMember(m, "unchanged", geomNew);
+      for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m))) pushMember(m, "removed", geomOld);
+      for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m))) pushMember(m, "added", geomNew);
     }
     if (!drawables.length) return [];
     return drawables;
@@ -1025,7 +1108,7 @@ if (typeof document !== "undefined") {
     map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
     map.invalidateSize();
   }
-  function buildMapView(oldObj, newObj) {
+  function buildMapView(oldObj, newObj, bounds) {
     const div = document.createElement("div");
     div.hidden = true;
     div.appendChild(el("p", "Loading map…", "muted"));
@@ -1034,7 +1117,7 @@ if (typeof document !== "undefined") {
       if (loaded) return;
       loaded = true;
       try {
-        const drawables = await collectMapDrawables(oldObj, newObj);
+        const drawables = await collectMapDrawables(oldObj, newObj, bounds);
         await drawMapIn(div, drawables, "No drawable geometry for this object.");
       } catch (e) {
         div.innerHTML = "";
@@ -1775,7 +1858,7 @@ if (typeof document !== "undefined") {
     }
     return out;
   }
-  function renderChangesetCard(action, oldObj, newObj, oldUnavailable, oldPending) {
+  function renderChangesetCard(action, oldObj, newObj, oldUnavailable, oldPending, changesetId) {
     const obj = newObj || oldObj;
     const card = el("div", null, "obj");
     const title = document.createElement("span");
@@ -1840,7 +1923,8 @@ if (typeof document !== "undefined") {
     const geomChanged = action === "create" || action === "delete" || (oldObj && newObj && (obj.type === "node" ? (oldObj.lat !== newObj.lat || oldObj.lon !== newObj.lon) : obj.type === "way" ? JSON.stringify(oldObj.nodeRefs || null) !== JSON.stringify(newObj.nodeRefs || null) : false));
     if (!td.length && (!md || (!md.added.length && !md.removed.length)) && !geomChanged) previewView.appendChild(el("p", "No differences", "muted"));
     const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation", mapOld || emptyObj, mapNew || emptyObj);
-    const mapView = buildMapView(mapOld || emptyObj, mapNew || emptyObj);
+    const csNum = changesetId == null ? null : parseInt(changesetId, 10);
+    const mapView = buildMapView(mapOld || emptyObj, mapNew || emptyObj, csNum == null || !Number.isFinite(csNum) ? null : { old: { changeset: csNum, inclusive: false }, new: { changeset: csNum, inclusive: true } });
     wireSwitch(btns, { preview: previewView, diff: diffView, map: mapView });
     card.appendChild(previewView);
     card.appendChild(diffView);
@@ -1980,11 +2064,15 @@ if (typeof document !== "undefined") {
       card.appendChild(section("State in this version:", [state]));
       detailWrap.appendChild(card);
       // Map: selected version against the previous one (all added for v1,
-      // all removed for a delete). Member way geometry and node positions
-      // are current, not as of this version; node positions are exact.
+      // all removed for a delete). Geometry resolves as of each side's
+      // changeset, so the map shows the state at the moment of that
+      // changeset.
       const oldObj = !prev ? emptyObjFor(cur) : prev;
       const newObj = cur.visible ? cur : emptyObjFor(cur);
-      const mapView = buildMapView(oldObj, newObj);
+      const histBounds = (cur.changeset != null && (!prev || prev.changeset != null))
+        ? { old: prev ? { changeset: prev.changeset, inclusive: true } : null, new: { changeset: cur.changeset, inclusive: true } }
+        : null;
+      const mapView = buildMapView(oldObj, newObj, histBounds);
       mapView.hidden = false;
       mapWrap.appendChild(mapView);
       mapView.load();
@@ -2039,7 +2127,7 @@ if (typeof document !== "undefined") {
           oldUnavailable: false,
           oldPending: e.action === "modify",
         }));
-        const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldPending));
+        const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldPending, id));
         // Overview map between the changeset description and the cards.
         const overviewCache = { coords: new Map(), external: new Map() };
         const overview = buildOverviewMapView(pairs, overviewCache, (i) => cards[i]);
@@ -2067,7 +2155,7 @@ if (typeof document !== "undefined") {
                 p.oldUnavailable = true;
               }
               p.oldPending = false;
-              const newCard = renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, false);
+              const newCard = renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, false, id);
               const oldCard = cards[i];
               if (oldCard && oldCard.parentNode) oldCard.parentNode.replaceChild(newCard, oldCard);
               cards[i] = newCard;

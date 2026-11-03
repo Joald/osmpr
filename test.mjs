@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput, pickVersionAtChangeset };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput, pickVersionAtChangeset } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -283,5 +283,21 @@ assert.deepEqual(parseGoInput("2402490", "node"), { view: "history", type: "node
 assert.equal(parseGoInput("garbage", "relation"), null);
 assert.equal(parseGoInput("", "relation"), null);
 assert.equal(parseGoInput("2402490", "bogus"), null);
+
+// --- version as of a changeset bound ---
+const histEls = [
+  { version: 1, changeset: 100 },
+  { version: 2, changeset: 200 },
+  { version: 3, changeset: 300, visible: false },
+];
+assert.equal(pickVersionAtChangeset(histEls, 200, true).version, 2);
+assert.equal(pickVersionAtChangeset(histEls, 200, false).version, 1);
+assert.equal(pickVersionAtChangeset(histEls, 150, true).version, 1);
+assert.equal(pickVersionAtChangeset(histEls, 50, true), null);
+assert.equal(pickVersionAtChangeset(histEls, 300, true), null); // deleted by then
+assert.equal(pickVersionAtChangeset(histEls, 300, false).version, 2);
+assert.equal(pickVersionAtChangeset(histEls, 999, true), null); // still deleted
+assert.equal(pickVersionAtChangeset([], 100, true), null);
+assert.equal(pickVersionAtChangeset(histEls, null, true), null);
 
 console.log("All editor logic tests passed.");
