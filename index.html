@@ -801,6 +801,40 @@ if (typeof document !== "undefined") {
     }
     return out;
   }
+  async function lastVisibleHistoryElement(type, id) {
+    // Last non-deleted version of an object from its history. A delete
+    // version carries visible=false and no geometry (no members/nodes),
+    // so "last version" alone is the wrong pick for a deleted object.
+    const res = await fetch(API_BASE + "/" + type + "/" + id + "/history.json");
+    if (!res.ok) return null;
+    const els = (await res.json()).elements || [];
+    for (let i = els.length - 1; i >= 0; i--) if (els[i].visible !== false) return els[i];
+    return null;
+  }
+  async function fillMissingNodeCoords(coords, refs) {
+    // Nodes deleted since a version was recorded are absent from a
+    // current /nodes.json fetch; fall back to their last non-deleted
+    // history version, capped so one map cannot hammer the API.
+    const missing = (refs || []).filter((r) => !coords.has(r)).slice(0, 100);
+    for (const nid of missing) {
+      try {
+        const last = await lastVisibleHistoryElement("node", nid);
+        if (last && hasCoords(last)) coords.set(nid, { lat: last.lat, lon: last.lon });
+      } catch (e) { /* leave missing */ }
+    }
+  }
+  async function fetchDeletedWayPts(wid) {
+    // Last-known polyline of a deleted way: its last non-deleted
+    // version's nodeRefs + coordinates (current where alive,
+    // last-known where deleted).
+    const last = await lastVisibleHistoryElement("way", wid);
+    const refs = (last && last.nodes) || [];
+    if (refs.length < 2) return null;
+    const coords = await fetchNodeCoords(refs);
+    await fillMissingNodeCoords(coords, refs);
+    const pts = refs.map((r) => coords.get(r)).filter(hasCoords);
+    return pts.length >= 2 ? pts : null;
+  }
   async function fetchObjectFull(type, id) {
     const res = await fetch(API_BASE + "/" + type + "/" + id + "/full.json");
     if (!res.ok) throw new Error("Full fetch failed (" + res.status + ") for " + type + " " + id);
@@ -831,6 +865,7 @@ if (typeof document !== "undefined") {
       else drawables.push({ kind: "unchanged", pts: [{ lat: oldObj.lat, lon: oldObj.lon }] });
     } else if (type === "way") {
       const coords = await fetchNodeCoords([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
+      await fillMissingNodeCoords(coords, [...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
       const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
       const oPts = line(oldObj.nodeRefs), nPts = line(newObj.nodeRefs);
       const changed = JSON.stringify(oldObj.nodeRefs) !== JSON.stringify(newObj.nodeRefs);
@@ -864,8 +899,8 @@ if (typeof document !== "undefined") {
       // A deleted relation has no current full object: the API answers
       // 410 Gone for /relation/<id>/full.json once the relation is
       // deleted, which must not fail the whole map. Fall back to the
-      // member ways from oldObj/newObj, fetched individually below
-      // (member ways are not deleted, so their full fetches succeed).
+      // member ways from oldObj/newObj, fetched individually below; a
+      // member way deleted since is drawn from its last-known geometry.
       let full = null;
       try { full = await fetchObjectFull("relation", oldObj.id); } catch (e) { /* deleted relation in changeset view */ }
       const wayGeom = new Map();
@@ -897,7 +932,14 @@ if (typeof document !== "undefined") {
           const wfull = await fetchObjectFull("way", wid);
           const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
           if (pts.length >= 2) wayGeom.set(wid, pts);
-        } catch (e) { /* skip unfetchable way */ }
+        } catch (e) {
+          // Deleted member way: draw its last-known geometry instead
+          // of dropping it.
+          try {
+            const pts = await fetchDeletedWayPts(wid);
+            if (pts) wayGeom.set(wid, pts);
+          } catch (e2) { /* skip unfetchable way */ }
+        }
       }
       const oldKeys = new Set((oldObj.members || []).map(memberKey));
       const newKeys = new Set((newObj.members || []).map(memberKey));
@@ -1007,6 +1049,7 @@ if (typeof document !== "undefined") {
       const fresh = await fetchNodeCoords(missingIds);
       for (const [k, v] of fresh) cache.coords.set(k, v);
     }
+    await fillMissingNodeCoords(cache.coords, nodeIds);
     const coords = cache.coords;
     const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
     // Segment-level way diff: drawing the whole old way red and the
@@ -1055,7 +1098,14 @@ if (typeof document !== "undefined") {
         const wfull = await fetchObjectFull("way", wid);
         const pts = (wfull.wayNodes.get(wid) || []).map((r) => wfull.nodeCoords.get(r)).filter(hasCoords);
         if (pts.length >= 2) externalGeom.set(wid, pts);
-      } catch (e) { /* skip unfetchable way */ }
+      } catch (e) {
+        // Deleted external way: draw its last-known geometry instead
+        // of dropping it.
+        try {
+          const pts = await fetchDeletedWayPts(wid);
+          if (pts) externalGeom.set(wid, pts);
+        } catch (e2) { /* skip unfetchable way */ }
+      }
     }
     const memberPts = (m, which) => {
       const refs = which === "old" ? oldWayRefs.get(m.ref) : newWayRefs.get(m.ref);
