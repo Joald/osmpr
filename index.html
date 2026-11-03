@@ -72,9 +72,7 @@
   textarea { background: #121417; color: #e8e8e8; border: 1px solid #3a3f44; border-radius: 8px; padding: 8px 10px; width: 100%; }
   .obj { background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
   .obj h3 { margin-top: 0; }
-  .hist-version { cursor: pointer; padding: 6px 10px; border-radius: 8px; }
-  .hist-version:hover { background: #23272c; }
-  .hist-selected { background: #2a2e33; }
+  .hist-strip { margin: 12px 0; }
   ul.diff { list-style: none; padding: 0; margin: 6px 0; }
   ul.diff li { padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
   .add { color: #7ee787; }
@@ -1832,31 +1830,20 @@ if (typeof document !== "undefined") {
       a.textContent = cs;
       return a;
     }
-    function summaryText(i) {
-      const s = historyChangeSummary(i > 0 ? versions[i - 1] : null, versions[i]);
-      if (s.kind === "created") return "created";
-      if (s.kind === "deleted") return "deleted";
-      const parts = [];
-      if (s.addedMembers) parts.push("+" + s.addedMembers + " members");
-      if (s.removedMembers) parts.push("-" + s.removedMembers + " members");
-      if (s.tagChanges) parts.push(s.tagChanges + " tag" + (s.tagChanges === 1 ? "" : "s"));
-      if (s.geometryChanged) parts.push("geometry changed");
-      return parts.length ? parts.join(", ") : "no change";
-    }
     function renderList() {
+      // Horizontal strip of version chips, newest first, labels only.
+      // Dates, users, changesets, and change summaries live in the detail
+      // card for the selected version.
       listWrap.innerHTML = "";
-      const ul = el("ul", null, "diff");
+      const strip = el("div", null, "row hist-strip");
       for (let i = versions.length - 1; i >= 0; i--) {
         const v = versions[i];
-        const li = document.createElement("li");
-        li.className = "hist-version" + (i === selected ? " hist-selected" : "");
-        li.appendChild(document.createTextNode("v" + v.version + " | " + fmtDate(v.timestamp) + " | " + (v.user || "?") + " | changeset "));
-        li.appendChild(changesetLink(v.changeset));
-        li.appendChild(document.createTextNode(" | " + summaryText(i) + (v.visible ? "" : " (deleted)")));
-        li.addEventListener("click", () => { selected = i; renderList(); renderDetail(); });
-        ul.appendChild(li);
+        const btn = el("button", "v" + v.version, i === selected ? null : "secondary");
+        btn.type = "button";
+        btn.addEventListener("click", () => { selected = i; renderList(); renderDetail(); });
+        strip.appendChild(btn);
       }
-      listWrap.appendChild(ul);
+      listWrap.appendChild(strip);
     }
     function emptyObjFor(v) { return { type: v.type, id: v.id, members: [], nodeRefs: [], lat: null, lon: null }; }
     function renderDetail() {
