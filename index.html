@@ -100,6 +100,26 @@
   .diff-del { background: rgba(255, 123, 114, 0.12); }
   tr.diff-expand td { text-align: center; padding: 6px; }
   a { color: #7fb3e8; }
+  /* Overview map popup/tooltip, matched to the page dark theme:
+     Leaflet's defaults are light, which clashed with everything here. */
+  .leaflet-popup-content-wrapper { background: #1a1d21; color: #e8e8e8; border: 1px solid #2a2e33; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+  .leaflet-popup-content { margin: 14px 16px; line-height: 1.5; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 0.9rem; }
+  .leaflet-popup-tip { background: #1a1d21; border: 1px solid #2a2e33; box-shadow: none; }
+  .leaflet-popup-close-button { color: #9aa0a6 !important; padding: 8px 10px 0 0 !important; font-size: 16px !important; }
+  .leaflet-tooltip.osmpr-tooltip { background: #1a1d21; color: #e8e8e8; border: 1px solid #2a2e33; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.45); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 0.85rem; padding: 4px 8px; }
+  .leaflet-tooltip.osmpr-tooltip::before { display: none; }
+  .osmpr-popup-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
+  .osmpr-popup-title a { color: #7fb3e8; text-decoration: none; }
+  .osmpr-popup-title a:hover { text-decoration: underline; }
+  .osmpr-kind { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }
+  .osmpr-kind.added, .osmpr-kind.new { background: rgba(126,231,135,0.15); color: #7ee787; }
+  .osmpr-kind.removed, .osmpr-kind.old { background: rgba(255,123,114,0.15); color: #ff7b72; }
+  .osmpr-kind.unchanged { background: rgba(138,143,152,0.18); color: #c0c4ca; }
+  .osmpr-kind.connector { background: rgba(227,179,65,0.15); color: #e3b341; }
+  .osmpr-popup-via { color: #9aa0a6; font-size: 0.85rem; margin: 0 0 10px; }
+  .osmpr-popup-via a { color: #7fb3e8; text-decoration: none; }
+  .osmpr-popup-via a:hover { text-decoration: underline; }
+  .leaflet-popup-content button { width: 100%; }
 </style>
 </head>
 <body>
@@ -614,38 +634,66 @@ if (typeof document !== "undefined") {
     const renderLines = (lines, contentFn) => {
       const table = document.createElement("table");
       table.className = "diff-table";
+      // Visible lines, one tbody per line (keeps line numbers aligned).
+      const appendVisible = (lns) => {
+        for (const ln of lns) {
+          const tb = document.createElement("tbody");
+          tb.appendChild(lineRow(ln, contentFn));
+          table.appendChild(tb);
+        }
+      };
+      // One-shot expander: expanding reveals the lines and removes the
+      // button itself, so there is nothing left to toggle back.
+      const appendExpander = (hiddenLines) => {
+        if (!hiddenLines.length) return;
+        const expBody = document.createElement("tbody");
+        const expRow = document.createElement("tr");
+        expRow.className = "diff-expand";
+        const td = document.createElement("td");
+        td.colSpan = 3;
+        const btn = document.createElement("button");
+        btn.type = "button"; btn.className = "secondary chev-btn";
+        const ch = document.createElement("span"); ch.className = "chev right";
+        btn.appendChild(ch);
+        btn.appendChild(document.createTextNode(" " + hiddenLines.length + (hiddenLines.length === 1 ? " unchanged line" : " unchanged lines")));
+        const runBody = document.createElement("tbody");
+        runBody.hidden = true;
+        for (const ln of hiddenLines) runBody.appendChild(lineRow(ln, contentFn));
+        btn.addEventListener("click", () => { runBody.hidden = false; expBody.remove(); });
+        td.appendChild(btn);
+        expRow.appendChild(td);
+        expBody.appendChild(expRow);
+        table.appendChild(expBody);
+        table.appendChild(runBody);
+      };
+      // Unchanged runs show 3 lines of context around each change
+      // (GitHub-style): the head/tail of a run stays visible and only
+      // the middle collapses. A run with no change on either side
+      // (the whole diff is unchanged) keeps the old whole-run expander.
+      const CONTEXT = 3;
       let i = 0;
       while (i < lines.length) {
-        if (lines[i].kind === "same") {
-          let j = i;
-          while (j < lines.length && lines[j].kind === "same") j++;
-          const run = lines.slice(i, j);
-          const expBody = document.createElement("tbody");
-          const expRow = document.createElement("tr");
-          expRow.className = "diff-expand";
-          const td = document.createElement("td");
-          td.colSpan = 3;
-          const btn = document.createElement("button");
-          btn.type = "button"; btn.className = "secondary chev-btn";
-          const ch = document.createElement("span"); ch.className = "chev right";
-          btn.appendChild(ch);
-          btn.appendChild(document.createTextNode(" " + run.length + (run.length === 1 ? " unchanged line" : " unchanged lines")));
-          const runBody = document.createElement("tbody");
-          runBody.hidden = true;
-          for (const ln of run) runBody.appendChild(lineRow(ln, contentFn));
-          btn.addEventListener("click", () => { runBody.hidden = !runBody.hidden; ch.classList.toggle("right", runBody.hidden); });
-          td.appendChild(btn);
-          expRow.appendChild(td);
-          expBody.appendChild(expRow);
-          table.appendChild(expBody);
-          table.appendChild(runBody);
-          i = j;
+        if (lines[i].kind !== "same") { appendVisible([lines[i]]); i++; continue; }
+        let j = i;
+        while (j < lines.length && lines[j].kind === "same") j++;
+        const run = lines.slice(i, j);
+        const atStart = i === 0, atEnd = j === lines.length;
+        if (atStart && atEnd) {
+          appendExpander(run);
+        } else if (atStart) {
+          appendExpander(run.slice(0, Math.max(0, run.length - CONTEXT)));
+          appendVisible(run.slice(-CONTEXT));
+        } else if (atEnd) {
+          appendVisible(run.slice(0, CONTEXT));
+          appendExpander(run.slice(CONTEXT));
+        } else if (run.length <= 2 * CONTEXT) {
+          appendVisible(run);
         } else {
-          const tb = document.createElement("tbody");
-          tb.appendChild(lineRow(lines[i], contentFn));
-          table.appendChild(tb);
-          i++;
+          appendVisible(run.slice(0, CONTEXT));
+          appendExpander(run.slice(CONTEXT, -CONTEXT));
+          appendVisible(run.slice(-CONTEXT));
         }
+        i = j;
       }
       return table;
     };
@@ -739,8 +787,30 @@ if (typeof document !== "undefined") {
       const oPts = line(oldObj.nodeRefs), nPts = line(newObj.nodeRefs);
       const changed = JSON.stringify(oldObj.nodeRefs) !== JSON.stringify(newObj.nodeRefs);
       if (changed) {
-        if (oPts.length >= 2) drawables.push({ kind: "old", pts: oPts });
-        if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts });
+        // Segment-level diff, as in the overview map: full old/new
+        // polylines hide the old under the new wherever nothing
+        // changed. Match consecutive node pairs as a multiset.
+        const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
+        const waySegments = (refs) => {
+          const segs = [];
+          for (let k = 0; k + 1 < (refs || []).length; k++) {
+            const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
+            if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), pts: [a, b] });
+          }
+          return segs;
+        };
+        const oldSegs = waySegments(oldObj.nodeRefs), newSegs = waySegments(newObj.nodeRefs);
+        const newCounts = new Map();
+        for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
+        const matched = new Map();
+        for (const s of oldSegs) {
+          if ((newCounts.get(s.key) || 0) > 0) { newCounts.set(s.key, newCounts.get(s.key) - 1); matched.set(s.key, (matched.get(s.key) || 0) + 1); }
+          else drawables.push({ kind: "removed", pts: s.pts });
+        }
+        for (const s of newSegs) {
+          if ((matched.get(s.key) || 0) > 0) { matched.set(s.key, matched.get(s.key) - 1); drawables.push({ kind: "unchanged", pts: s.pts }); }
+          else drawables.push({ kind: "added", pts: s.pts });
+        }
       } else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
     } else if (type === "relation") {
       const full = await fetchObjectFull("relation", oldObj.id);
@@ -883,6 +953,36 @@ if (typeof document !== "undefined") {
     }
     const coords = cache.coords;
     const line = (refs) => (refs || []).map((r) => coords.get(r)).filter(hasCoords);
+    // Segment-level way diff: drawing the whole old way red and the
+    // whole new way green on top of each other hides the red under the
+    // green wherever the geometry did not change, so the way looks
+    // entirely changed. Instead, match consecutive node pairs (as a
+    // multiset, so a segment used twice counts twice): segments in
+    // both are unchanged grey, segments only in the old are removed
+    // red, segments only in the new are added green.
+    const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
+    const waySegments = (refs) => {
+      const segs = [];
+      for (let k = 0; k + 1 < (refs || []).length; k++) {
+        const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
+        if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), pts: [a, b] });
+      }
+      return segs;
+    };
+    const pushWaySegmentDiff = (oldRefs, newRefs, obj, target) => {
+      const oldSegs = waySegments(oldRefs), newSegs = waySegments(newRefs);
+      const newCounts = new Map();
+      for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
+      const matched = new Map();
+      for (const s of oldSegs) {
+        if ((newCounts.get(s.key) || 0) > 0) { newCounts.set(s.key, newCounts.get(s.key) - 1); matched.set(s.key, (matched.get(s.key) || 0) + 1); }
+        else drawables.push({ kind: "removed", pts: s.pts, obj, target });
+      }
+      for (const s of newSegs) {
+        if ((matched.get(s.key) || 0) > 0) { matched.set(s.key, matched.get(s.key) - 1); drawables.push({ kind: "unchanged", pts: s.pts, obj, target }); }
+        else drawables.push({ kind: "added", pts: s.pts, obj, target });
+      }
+    };
     const externalIds = [];
     for (const p of pairs) {
       for (const m of [...((p.oldObj && p.oldObj.members) || []), ...((p.newObj && p.newObj.members) || [])]) {
@@ -955,9 +1055,7 @@ if (typeof document !== "undefined") {
         } else if (o.type === "way") {
           if (!old) { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj, target: pi }); }
           else if (JSON.stringify(old.nodeRefs || null) !== JSON.stringify(o.nodeRefs || null)) {
-            const oPts = line(old.nodeRefs), nPts = line(o.nodeRefs);
-            if (oPts.length >= 2) drawables.push({ kind: "old", pts: oPts, obj, target: pi });
-            if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts, obj, target: pi });
+            pushWaySegmentDiff(old.nodeRefs, o.nodeRefs, obj, pi);
           } else { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
         } else if (o.type === "relation") {
           const oldMembers = (old && old.members) || [];
@@ -986,11 +1084,16 @@ if (typeof document !== "undefined") {
   function overviewPopupContent(d, onPick) {
     const wrap = document.createElement("div");
     const title = document.createElement("div");
+    title.className = "osmpr-popup-title";
     title.appendChild(osmObjectLink(d.obj));
-    title.appendChild(document.createTextNode(" · " + (OVERVIEW_KIND_LABEL[d.kind] || d.kind)));
+    const badge = document.createElement("span");
+    badge.className = "osmpr-kind " + d.kind;
+    badge.textContent = OVERVIEW_KIND_LABEL[d.kind] || d.kind;
+    title.appendChild(badge);
     wrap.appendChild(title);
     if (d.via) {
       const via = document.createElement("div");
+      via.className = "osmpr-popup-via";
       via.appendChild(document.createTextNode("Member of relation "));
       via.appendChild(osmObjectLink(d.via));
       wrap.appendChild(via);
@@ -1022,7 +1125,7 @@ if (typeof document !== "undefined") {
         else layer = L.polyline(latlngs, { color, weight: 3 }).addTo(layers);
       }
       if (layer && d.obj && onPick) {
-        layer.bindTooltip(d.obj.type + " " + d.obj.id);
+        layer.bindTooltip(d.obj.type + " " + d.obj.id, { className: "osmpr-tooltip" });
         layer.bindPopup(overviewPopupContent(d, onPick));
       }
     }

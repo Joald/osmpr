@@ -132,6 +132,14 @@ present, `d` wins.
   member way) with a "Scroll to card" button; the click itself
   never scrolls, only the button does, and the target card is
   expanded if its group was collapsed, then briefly highlighted.
+  The popup and hover tooltip use the page dark theme. A changed
+  way is drawn segment by segment (consecutive node pairs
+  matched as a multiset): unchanged segments grey, removed
+  segments red, added segments green — never the whole new way
+  in green on top of the whole old way in red.
+- Diff views show 3 lines of context around each change; the
+  rest of an unchanged run collapses behind one expander, and
+  expanding it reveals the lines and removes the expander button.
 - Previous versions are fetched for every modified object, in
   batches of 100 so a large changeset never hits the API with
   hundreds of requests at once. The page renders immediately;
