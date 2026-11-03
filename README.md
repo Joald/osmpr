@@ -127,7 +127,11 @@ present, `d` wins.
   lat/lon (e.g. a deleted node referenced by a way) are skipped
   instead of breaking the map, and the renderers drop any
   remaining invalid points, so one bad drawable never wipes the
-  whole map.
+  whole map. Clicking a drawn element opens a popup naming the
+  object (with its change kind, and the relation for an external
+  member way) with a "Scroll to card" button; the click itself
+  never scrolls, only the button does, and the target card is
+  expanded if its group was collapsed, then briefly highlighted.
 - Previous versions are fetched for every modified object, in
   batches of 100 so a large changeset never hits the API with
   hundreds of requests at once. The page renders immediately;

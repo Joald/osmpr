@@ -869,9 +869,12 @@ if (typeof document !== "undefined") {
     const drawables = [];
     const newWayRefs = new Map(), oldWayRefs = new Map();
     const nodeIds = [];
-    for (const p of pairs) {
-      if (p.newObj && p.newObj.type === "way") { newWayRefs.set(p.newObj.id, p.newObj.nodeRefs || []); nodeIds.push(...(p.newObj.nodeRefs || [])); }
-      if (p.oldObj && p.oldObj.type === "way") { oldWayRefs.set(p.oldObj.id, p.oldObj.nodeRefs || []); nodeIds.push(...(p.oldObj.nodeRefs || [])); }
+    // Way id -> pair index, for the click-to-card target of member ways.
+    const pairIndexByWayId = new Map();
+    for (let pi = 0; pi < pairs.length; pi++) {
+      const p = pairs[pi];
+      if (p.newObj && p.newObj.type === "way") { newWayRefs.set(p.newObj.id, p.newObj.nodeRefs || []); nodeIds.push(...(p.newObj.nodeRefs || [])); pairIndexByWayId.set(p.newObj.id, pi); }
+      if (p.oldObj && p.oldObj.type === "way") { oldWayRefs.set(p.oldObj.id, p.oldObj.nodeRefs || []); nodeIds.push(...(p.oldObj.nodeRefs || [])); pairIndexByWayId.set(p.oldObj.id, pi); }
     }
     const missingIds = [...new Set(nodeIds)].filter((id) => !cache.coords.has(id));
     if (missingIds.length) {
@@ -903,60 +906,103 @@ if (typeof document !== "undefined") {
       if (refs) return line(refs);
       return externalGeom.get(m.ref) || null;
     };
-    const pushWayMembers = (members, which, kind) => {
+    // Every drawable carries its object and its card target, so a click
+    // on the map can say what it is and scroll to its card. A member way
+    // that is itself in the changeset targets its own card; an external
+    // member way targets the relation's card and notes the relation.
+    const pushWayMembers = (members, which, kind, relIndex, relId) => {
       for (const m of members || []) {
         if (m.type !== "way") continue;
         const pts = memberPts(m, which);
-        if (pts) drawables.push({ kind, pts });
+        if (!pts) continue;
+        const inChangeset = pairIndexByWayId.has(m.ref);
+        drawables.push({
+          kind, pts,
+          obj: { type: "way", id: m.ref },
+          target: inChangeset ? pairIndexByWayId.get(m.ref) : relIndex,
+          via: inChangeset ? null : { type: "relation", id: relId },
+        });
       }
     };
-    for (const p of pairs) {
+    for (let pi = 0; pi < pairs.length; pi++) {
+      const p = pairs[pi];
       if (p.action === "create") {
         const o = p.newObj;
         if (!o) continue;
-        if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }] });
-        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts }); }
-        else if (o.type === "relation") pushWayMembers(o.members, "new", "added");
+        if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }], obj: { type: o.type, id: o.id }, target: pi });
+        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj: { type: o.type, id: o.id }, target: pi }); }
+        else if (o.type === "relation") pushWayMembers(o.members, "new", "added", pi, o.id);
       } else if (p.action === "delete") {
         const o = p.oldObj;
         if (!o) continue;
-        if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "removed", pts: [{ lat: o.lat, lon: o.lon }] });
-        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts }); }
-        else if (o.type === "relation") pushWayMembers(o.members, "old", "removed");
+        if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "removed", pts: [{ lat: o.lat, lon: o.lon }], obj: { type: o.type, id: o.id }, target: pi });
+        else if (o.type === "way") { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts, obj: { type: o.type, id: o.id }, target: pi }); }
+        else if (o.type === "relation") pushWayMembers(o.members, "old", "removed", pi, o.id);
       } else {
         // modify
         const o = p.newObj, old = p.oldObj;
         if (!o) continue;
+        const obj = { type: o.type, id: o.id };
         if (o.type === "node") {
           if (!old || old.lat == null || old.lon == null) {
-            if (o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }] });
+            if (o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }], obj, target: pi });
           } else if (old.lat !== o.lat || old.lon !== o.lon) {
             const op = { lat: old.lat, lon: old.lon }, np = { lat: o.lat, lon: o.lon };
-            drawables.push({ kind: "old", pts: [op] });
-            drawables.push({ kind: "connector", pts: [op, np] });
-            drawables.push({ kind: "new", pts: [np] });
-          } else drawables.push({ kind: "unchanged", pts: [{ lat: o.lat, lon: o.lon }] });
+            drawables.push({ kind: "old", pts: [op], obj, target: pi });
+            drawables.push({ kind: "connector", pts: [op, np], obj, target: pi });
+            drawables.push({ kind: "new", pts: [np], obj, target: pi });
+          } else drawables.push({ kind: "unchanged", pts: [{ lat: o.lat, lon: o.lon }], obj, target: pi });
         } else if (o.type === "way") {
-          if (!old) { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts }); }
+          if (!old) { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj, target: pi }); }
           else if (JSON.stringify(old.nodeRefs || null) !== JSON.stringify(o.nodeRefs || null)) {
             const oPts = line(old.nodeRefs), nPts = line(o.nodeRefs);
-            if (oPts.length >= 2) drawables.push({ kind: "old", pts: oPts });
-            if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts });
-          } else { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts }); }
+            if (oPts.length >= 2) drawables.push({ kind: "old", pts: oPts, obj, target: pi });
+            if (nPts.length >= 2) drawables.push({ kind: "new", pts: nPts, obj, target: pi });
+          } else { const pts = line(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
         } else if (o.type === "relation") {
           const oldMembers = (old && old.members) || [];
           const newMembers = o.members || [];
           const oldKeys = new Set(oldMembers.map(memberKey));
           const newKeys = new Set(newMembers.map(memberKey));
-          pushWayMembers(newMembers.filter((m) => oldKeys.has(memberKey(m))), "new", "unchanged");
-          pushWayMembers(oldMembers.filter((m) => !newKeys.has(memberKey(m))), "old", "removed");
-          pushWayMembers(newMembers.filter((m) => !oldKeys.has(memberKey(m))), "new", "added");
+          pushWayMembers(newMembers.filter((m) => oldKeys.has(memberKey(m))), "new", "unchanged", pi, o.id);
+          pushWayMembers(oldMembers.filter((m) => !newKeys.has(memberKey(m))), "old", "removed", pi, o.id);
+          pushWayMembers(newMembers.filter((m) => !oldKeys.has(memberKey(m))), "new", "added", pi, o.id);
         }
       }
     }
     return { drawables, truncated };
   }
-  function addDrawablesToLayer(layers, drawables) {
+  const OVERVIEW_KIND_LABEL = { added: "Added", removed: "Removed", unchanged: "Unchanged", old: "Old version", new: "New version", connector: "Moved" };
+  function osmObjectLink(obj) {
+    const a = document.createElement("a");
+    a.href = "https://www.openstreetmap.org/" + obj.type + "/" + obj.id;
+    a.target = "_blank"; a.rel = "noopener";
+    a.textContent = obj.type + " " + obj.id;
+    return a;
+  }
+  // Click popup for an overview drawable: what the object is, and a
+  // button that scrolls to its card. Clicking the map element itself
+  // never scrolls — only the button inside the popup does.
+  function overviewPopupContent(d, onPick) {
+    const wrap = document.createElement("div");
+    const title = document.createElement("div");
+    title.appendChild(osmObjectLink(d.obj));
+    title.appendChild(document.createTextNode(" · " + (OVERVIEW_KIND_LABEL[d.kind] || d.kind)));
+    wrap.appendChild(title);
+    if (d.via) {
+      const via = document.createElement("div");
+      via.appendChild(document.createTextNode("Member of relation "));
+      via.appendChild(osmObjectLink(d.via));
+      wrap.appendChild(via);
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Scroll to card";
+    btn.addEventListener("click", () => onPick(d));
+    wrap.appendChild(btn);
+    return wrap;
+  }
+  function addDrawablesToLayer(layers, drawables, onPick) {
     const bounds = [];
     for (const d of drawables) {
       // Last line of defence: drop points without real coordinates, so
@@ -966,18 +1012,23 @@ if (typeof document !== "undefined") {
       const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
       const latlngs = pts.map((p) => [p.lat, p.lon]);
       bounds.push(...latlngs);
-      if (latlngs.length === 1) { if (d.kind !== "connector") L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(layers); }
-      else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(layers);
+      let layer = null;
+      if (latlngs.length === 1) { if (d.kind !== "connector") layer = L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(layers); }
+      else if (d.kind === "connector") layer = L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(layers);
       else {
         const first = pts[0], last = pts[pts.length - 1];
         const closed = first.lat === last.lat && first.lon === last.lon;
-        if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(layers);
-        else L.polyline(latlngs, { color, weight: 3 }).addTo(layers);
+        if (closed) layer = L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(layers);
+        else layer = L.polyline(latlngs, { color, weight: 3 }).addTo(layers);
+      }
+      if (layer && d.obj && onPick) {
+        layer.bindTooltip(d.obj.type + " " + d.obj.id);
+        layer.bindPopup(overviewPopupContent(d, onPick));
       }
     }
     return bounds;
   }
-  function buildOverviewMapView(pairs, cache) {
+  function buildOverviewMapView(pairs, cache, getCard) {
     const div = document.createElement("div");
     div.className = "panel";
     div.appendChild(el("p", "Loading overview map…", "muted"));
@@ -986,6 +1037,26 @@ if (typeof document !== "undefined") {
     // Re-entrant guard: a refresh requested while a draw is in flight runs
     // once afterwards, against the then-current pairs, instead of racing it.
     let loading = false, queued = false, mapState = null;
+    // Popup button action: close the popup, expand the card's group if
+    // it was collapsed, scroll to the card (resolved at click time, so
+    // batch re-renders cannot leave a stale element) and flash it.
+    const scrollToCard = (d) => {
+      if (d.target == null || !getCard) return;
+      const card = getCard(d.target);
+      if (!card) return;
+      if (mapState && mapState.map) mapState.map.closePopup();
+      for (let n = card.parentNode; n && n !== document.body; n = n.parentNode) {
+        if (n.hidden) {
+          n.hidden = false;
+          const head = n.previousElementSibling;
+          const chev = head ? head.querySelector(".chev") : null;
+          if (chev) chev.classList.remove("right");
+        }
+      }
+      card.scrollIntoView({ behavior: "smooth", block: "start" });
+      card.style.outline = "2px solid #7ee787";
+      setTimeout(() => { card.style.outline = ""; }, 2500);
+    };
     div.load = async () => {
       if (loading) { queued = true; return; }
       loading = true;
@@ -1002,7 +1073,7 @@ if (typeof document !== "undefined") {
           const map = L.map(mapDiv);
           L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
           const layers = L.layerGroup().addTo(map);
-          const bounds = addDrawablesToLayer(layers, drawables);
+          const bounds = addDrawablesToLayer(layers, drawables, scrollToCard);
           if (bounds.length) {
             map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
             map.invalidateSize();
@@ -1016,7 +1087,7 @@ if (typeof document !== "undefined") {
           }
         } else {
           mapState.layers.clearLayers();
-          addDrawablesToLayer(mapState.layers, drawables);
+          addDrawablesToLayer(mapState.layers, drawables, scrollToCard);
           if (truncated && !mapState.note) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
         }
         div.dataset.drawn = "1";
@@ -1605,7 +1676,7 @@ if (typeof document !== "undefined") {
         const cards = pairs.map((p) => renderChangesetCard(p.action, p.oldObj, p.newObj, p.oldUnavailable, p.oldPending));
         // Overview map between the changeset description and the cards.
         const overviewCache = { coords: new Map(), external: new Map() };
-        const overview = buildOverviewMapView(pairs, overviewCache);
+        const overview = buildOverviewMapView(pairs, overviewCache, (i) => cards[i]);
         $("preview").appendChild(overview);
         // Cards grouped by object type, each group collapsible (expanded
         // by default, like the Tags/Members sections inside a card).
