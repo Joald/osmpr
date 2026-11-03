@@ -1992,10 +1992,8 @@ if (typeof document !== "undefined") {
     let selected = versions.length - 1;
     const listWrap = document.createElement("div");
     const detailWrap = document.createElement("div");
-    const mapWrap = document.createElement("div");
     preview.appendChild(listWrap);
     preview.appendChild(detailWrap);
-    preview.appendChild(mapWrap);
     function fmtDate(ts) { return (ts || "").slice(0, 10); }
     function changesetLink(cs) {
       if (!cs) return document.createTextNode("(no changeset)");
@@ -2022,7 +2020,6 @@ if (typeof document !== "undefined") {
     function emptyObjFor(v) { return { type: v.type, id: v.id, members: [], nodeRefs: [], lat: null, lon: null }; }
     function renderDetail() {
       detailWrap.innerHTML = "";
-      mapWrap.innerHTML = "";
       const cur = versions[selected];
       const prev = selected > 0 ? versions[selected - 1] : null;
       const card = el("div", null, "obj");
@@ -2041,6 +2038,18 @@ if (typeof document !== "undefined") {
       nav.appendChild(nextBtn);
       card.appendChild(nav);
       if (!cur.visible) card.appendChild(el("p", "This version deleted the object.", "del"));
+      // Map directly under the prev/next navigation, with the change
+      // and state sections below it. Geometry resolves as of each
+      // side's changeset, so the map shows the state at the moment of
+      // that changeset.
+      const oldObj = !prev ? emptyObjFor(cur) : prev;
+      const newObj = cur.visible ? cur : emptyObjFor(cur);
+      const histBounds = (cur.changeset != null && (!prev || prev.changeset != null))
+        ? { old: prev ? { changeset: prev.changeset, inclusive: true } : null, new: { changeset: cur.changeset, inclusive: true } }
+        : null;
+      const mapView = buildMapView(oldObj, newObj, histBounds);
+      mapView.hidden = false;
+      card.appendChild(mapView);
       const s = historyChangeSummary(prev, cur);
       const ch = document.createElement("div");
       if (s.kind === "created") ch.appendChild(el("p", "Object created in this version.", "muted"));
@@ -2083,18 +2092,6 @@ if (typeof document !== "undefined") {
       }
       card.appendChild(section("State in this version:", [state]));
       detailWrap.appendChild(card);
-      // Map: selected version against the previous one (all added for v1,
-      // all removed for a delete). Geometry resolves as of each side's
-      // changeset, so the map shows the state at the moment of that
-      // changeset.
-      const oldObj = !prev ? emptyObjFor(cur) : prev;
-      const newObj = cur.visible ? cur : emptyObjFor(cur);
-      const histBounds = (cur.changeset != null && (!prev || prev.changeset != null))
-        ? { old: prev ? { changeset: prev.changeset, inclusive: true } : null, new: { changeset: cur.changeset, inclusive: true } }
-        : null;
-      const mapView = buildMapView(oldObj, newObj, histBounds);
-      mapView.hidden = false;
-      mapWrap.appendChild(mapView);
       mapView.load();
     }
     renderList();
