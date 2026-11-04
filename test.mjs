@@ -300,4 +300,18 @@ assert.equal(pickVersionAtChangeset(histEls, 999, true), null); // still deleted
 assert.equal(pickVersionAtChangeset([], 100, true), null);
 assert.equal(pickVersionAtChangeset(histEls, null, true), null);
 
+// --- error toast wiring (browser UI, checked statically: it lives inside
+// the document-guarded block, so it cannot be exercised under node) ---
+// The upload catch must surface failures visibly, not just in the console:
+// a 413 on the second object once went unnoticed that way.
+assert.match(html, /showErrorToast\(e\.message, failedId, failedClosed\)/,
+  "upload catch must show an error toast");
+assert.match(html, /function showErrorToast\(message, changesetId, changesetClosed\)/,
+  "error toast must carry the message and the failed changeset");
+const errorToastBody = html.split("function showErrorToast")[1].split("\n  function el(")[0];
+assert.match(errorToastBody, /t\.className = "panel error"/, "error toast must use the error styling");
+assert.ok(!/setTimeout\(\(\) => \{ t\.hidden = true; \}/.test(errorToastBody),
+  "error toast must not auto-hide like the success toast");
+assert.match(errorToastBody, /Upload failed: " \+ message/, "error toast must show the API error text");
+
 console.log("All editor logic tests passed.");

@@ -1494,6 +1494,7 @@ if (typeof document !== "undefined") {
   let toastTimer = null;
   function showToast(changesetId) {
     const t = $("toast");
+    t.className = "panel";
     t.innerHTML = "";
     const row = el("div", null, "row");
     const p = el("p", null);
@@ -1513,6 +1514,42 @@ if (typeof document !== "undefined") {
     t.hidden = false;
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { t.hidden = true; }, 15000);
+  }
+  // Error toast: unlike the success toast, this one does NOT auto-hide.
+  // An upload failure (e.g. a 413 on the second object, after earlier objects
+  // already uploaded) must still be visible when the user looks back at the
+  // page, not vanish after 15 seconds. The API error text is inserted as
+  // text, never as HTML, and the failed changeset (if one was created) is
+  // linked so the partial upload can be inspected.
+  function showErrorToast(message, changesetId, changesetClosed) {
+    const t = $("toast");
+    t.className = "panel error";
+    t.innerHTML = "";
+    const p = el("p", "Upload failed: " + message);
+    p.style.margin = "0";
+    t.appendChild(p);
+    const row = el("div", null, "row");
+    if (changesetId) {
+      const info = el("p", null, "small muted");
+      info.style.margin = "0";
+      info.style.flex = "1";
+      info.appendChild(document.createTextNode("Changeset: "));
+      const a = document.createElement("a");
+      a.href = "https://www.openstreetmap.org/changeset/" + changesetId;
+      a.target = "_blank"; a.rel = "noopener"; a.textContent = changesetId;
+      info.appendChild(a);
+      info.appendChild(document.createTextNode(changesetClosed
+        ? " (closed; objects uploaded before the failure remain uploaded)."
+        : " (still open; OSM auto-closes idle changesets after an hour)."));
+      row.appendChild(info);
+    }
+    const close = el("button", "Close", "secondary");
+    close.type = "button";
+    close.addEventListener("click", () => { t.hidden = true; });
+    row.appendChild(close);
+    t.appendChild(row);
+    t.hidden = false;
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
   }
   function el(tag, text, cls) {
     const n = document.createElement(tag);
@@ -1838,17 +1875,23 @@ if (typeof document !== "undefined") {
       await loadChangesetView(doneId);
     } catch (e) {
       log("Upload error: " + e.message, "note");
+      let failedId = null;
+      let failedClosed = false;
       if (openChangesetId) {
-        const failedId = openChangesetId;
+        failedId = openChangesetId;
         openChangesetId = null;
         try {
           const closeRes = await fetch(API_BASE + "/changeset/" + failedId + "/close", { method: "PUT", headers: { Authorization: "Bearer " + token } });
+          failedClosed = closeRes.ok;
           if (closeRes.ok) log("Changeset " + failedId + " closed after failed upload.");
           else log("Changeset " + failedId + " is still open; OSM auto-closes idle changesets after an hour.", "note");
         } catch (closeErr) {
           log("Changeset " + failedId + " is still open; OSM auto-closes idle changesets after an hour.", "note");
         }
       }
+      // Visible, persistent error toast: console-only logging is how a
+      // failed upload (e.g. 413 on the second object) went unnoticed.
+      showErrorToast(e.message, failedId, failedClosed);
     } finally {
       updateUploadButton();
     }

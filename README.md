@@ -24,7 +24,9 @@ shareable link: open the link, review the diff, click Upload.
    object on one map (nodes, ways, and relation member ways).
 3. You click **Upload**. The page creates one changeset, uploads every
    changed object, and closes the changeset. A toast confirms the
-   upload, and the page switches to the new changeset's view.
+   upload, and the page switches to the new changeset's view. A failed
+   upload shows a persistent error toast instead (it stays until you
+   close it, and links the failed changeset when one was created).
 
 An existing changeset can be viewed the same way: open
 `?changeset=<id>`, or paste an id or changeset URL in the page header.
