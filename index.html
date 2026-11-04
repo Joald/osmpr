@@ -363,19 +363,32 @@ function applyOps(current, ops) {
   if ((ops.add.length || ops.remove.length) && current.type !== "relation") {
     throw new Error("Member operations only apply to relations, not to " + current.type + " " + current.id + ".");
   }
+  // Members removed more than once (i.e. duplicates of the same member) are
+  // noted only after the adds, so a remove+add of the same member reads as
+  // one deduplication (-N copies, +1 back) instead of a plain removal.
+  // Key: memberKey of the remove target; value: {type, ref, role, count}.
+  const removedCopies = new Map();
   for (const r of ops.remove) {
-    const before = members.length;
+    const removed = members.filter((m) => (m.type === r.type && m.ref === r.ref && (!r.roleGiven || m.role === r.role)));
     members = members.filter((m) => !(m.type === r.type && m.ref === r.ref && (!r.roleGiven || m.role === r.role)));
-    const n = before - members.length;
+    const n = removed.length;
     if (n === 0) notes.push({ kind: "warn", text: "Remove target not present: " + r.type + " " + r.ref + (r.roleGiven ? " (" + r.role + ")" : "") });
-    else if (n > 1) notes.push({ kind: "note", text: "Removed " + n + " matching members: " + r.type + " " + r.ref });
+    else if (n > 1) removedCopies.set(memberKey(r), { type: r.type, ref: r.ref, role: removed[0].role, count: n });
   }
   for (const a of ops.add) {
     if (members.some((m) => memberKey(m) === memberKey(a))) {
       notes.push({ kind: "note", text: "Already present, skipped: " + a.type + " " + a.ref + " (" + (a.role || "(no role)") + ")" });
     } else {
       members.push({ type: a.type, ref: a.ref, role: a.role || "" });
+      const rc = removedCopies.get(memberKey(a));
+      if (rc) {
+        notes.push({ kind: "note", text: "Deduplicated " + a.type + " " + a.ref + " (" + (a.role || "no role") + "): it was listed " + rc.count + "× in this relation; removed " + rc.count + " copies and added 1 back (net −" + (rc.count - 1) + "; the surviving copy moves to the end of the member list)." });
+        removedCopies.delete(memberKey(a));
+      }
     }
+  }
+  for (const rc of removedCopies.values()) {
+    notes.push({ kind: "note", text: "Removed " + rc.count + " copies of " + rc.type + " " + rc.ref + " (" + (rc.role || "no role") + ") — it was listed " + rc.count + "× in this relation." });
   }
   const tags = Object.assign({}, current.tags);
   for (const [k, v] of Object.entries(ops.tags || {})) {
@@ -407,13 +420,37 @@ function applyOps(current, ops) {
   return { members, tags, notes, changed, lat, lon, nodeRefs };
 }
 function diffMembers(oldMembers, newMembers) {
-  const oldKeys = new Set(oldMembers.map(memberKey));
-  const newKeys = new Set(newMembers.map(memberKey));
-  return {
-    added: newMembers.filter((m) => !oldKeys.has(memberKey(m))),
-    removed: oldMembers.filter((m) => !newKeys.has(memberKey(m))),
-    unchangedCount: oldMembers.filter((m) => newKeys.has(memberKey(m))).length,
+  // Occurrence-aware: a member listed twice is two copies, not one set
+  // element. A set-based diff hides deduplication entirely (old [X, X] and
+  // new [X] share the same key set, so it reports no change at all), while
+  // the occurrence diff reports exactly one removed copy.
+  const countByKey = (members) => {
+    const counts = new Map();
+    for (const m of members) counts.set(memberKey(m), (counts.get(memberKey(m)) || 0) + 1);
+    return counts;
   };
+  const oldCounts = countByKey(oldMembers);
+  const newCounts = countByKey(newMembers);
+  const added = [];
+  const removed = [];
+  let unchangedCount = 0;
+  const seen = new Map();
+  for (const m of newMembers) {
+    const k = memberKey(m);
+    if (seen.get(k) === undefined) seen.set(k, 0);
+    const already = seen.get(k);
+    seen.set(k, already + 1);
+    if (already < (oldCounts.get(k) || 0)) unchangedCount++;
+    else if (already >= (oldCounts.get(k) || 0)) added.push(m);
+  }
+  seen.clear();
+  for (const m of oldMembers) {
+    const k = memberKey(m);
+    const already = seen.get(k) || 0;
+    seen.set(k, already + 1);
+    if (already >= (newCounts.get(k) || 0)) removed.push(m);
+  }
+  return { added, removed, unchangedCount };
 }
 function diffTags(oldTags, newTags) {
   const out = [];
@@ -466,17 +503,20 @@ function buildDiffLines(oldTags, oldMembers, newTags, newMembers, oldGeom, newGe
     } else tagLines.push({ kind: "same", oldNo: oldIdx.get(k), newNo: newIdx.get(k), key: k, value: newTags[k] });
   }
   const memberLines = [];
-  const oldMIdx = new Map((oldMembers || []).map((m, i) => [memberKey(m), i + 1]));
-  const newMIdx = new Map((newMembers || []).map((m, i) => [memberKey(m), i + 1]));
+  // Occurrence-aware matching, same pattern as way node refs below: match
+  // each new member to the earliest still-unused old position of the same
+  // member, so a duplicated member that survives once shows as one removed
+  // copy instead of vanishing from the diff entirely.
+  const oldQueues = new Map();
+  (oldMembers || []).forEach((m, i) => { const k = memberKey(m); if (!oldQueues.has(k)) oldQueues.set(k, []); oldQueues.get(k).push(i + 1); });
+  const usedOld = new Set();
   for (const m of newMembers || []) {
     const k = memberKey(m);
-    if (oldMIdx.has(k)) memberLines.push({ kind: "same", oldNo: oldMIdx.get(k), newNo: newMIdx.get(k), member: m });
-    else memberLines.push({ kind: "add", oldNo: "", newNo: newMIdx.get(k), member: m });
+    const q = oldQueues.get(k);
+    if (q && q.length) { const oldNo = q.shift(); usedOld.add(oldNo); memberLines.push({ kind: "same", oldNo, newNo: memberLines.length + 1, member: m }); }
+    else memberLines.push({ kind: "add", oldNo: "", newNo: memberLines.length + 1, member: m });
   }
-  for (const m of oldMembers || []) {
-    const k = memberKey(m);
-    if (!newMIdx.has(k)) memberLines.push({ kind: "del", oldNo: oldMIdx.get(k), newNo: "", member: m });
-  }
+  (oldMembers || []).forEach((m, i) => { if (!usedOld.has(i + 1)) memberLines.push({ kind: "del", oldNo: i + 1, newNo: "", member: m }); });
   const geometryLines = [];
   const gType = (oldGeom && oldGeom.type) || (newGeom && newGeom.type);
   if (gType === "node") {
