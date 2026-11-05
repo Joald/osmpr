@@ -382,13 +382,13 @@ function applyOps(current, ops) {
       members.push({ type: a.type, ref: a.ref, role: a.role || "" });
       const rc = removedCopies.get(memberKey(a));
       if (rc) {
-        notes.push({ kind: "note", text: "Deduplicated " + a.type + " " + a.ref + " (" + (a.role || "no role") + "): it was listed " + rc.count + "× in this relation; removed " + rc.count + " copies and added 1 back (net −" + (rc.count - 1) + "; the surviving copy moves to the end of the member list)." });
+        notes.push({ kind: "note", text: "Dedup " + a.type + " " + a.ref + " (" + (a.role || "no role") + "): " + rc.count + "× → 1×" });
         removedCopies.delete(memberKey(a));
       }
     }
   }
   for (const rc of removedCopies.values()) {
-    notes.push({ kind: "note", text: "Removed " + rc.count + " copies of " + rc.type + " " + rc.ref + " (" + (rc.role || "no role") + ") — it was listed " + rc.count + "× in this relation." });
+    notes.push({ kind: "note", text: "Removed " + rc.type + " " + rc.ref + " (" + (rc.role || "no role") + "): " + rc.count + "× → 0×" });
   }
   const tags = Object.assign({}, current.tags);
   for (const [k, v] of Object.entries(ops.tags || {})) {

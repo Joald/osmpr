@@ -329,7 +329,7 @@ const quadDm = diffMembers(
 assert.equal(quadDm.removed.length, 3);
 assert.equal(quadDm.unchangedCount, 1);
 
-// --- applyOps dedup note: -N copies +1 back, and the 2x fact, in one note ---
+// --- applyOps dedup note: short targeted info, not an essay ---
 const jardinPre = {
   type: "relation", id: 900050, version: 3, tags: { name: "Barrio Jardín" },
   members: [member("way", 11, "outer"), member("way", 12, "outer"), member("way", 12, "outer"), member("node", 99, "label")],
@@ -341,15 +341,14 @@ const jardinFixed = applyOps(jardinPre, {
 });
 assert.equal(jardinFixed.members.length, 3);
 assert.equal(jardinFixed.members[2].ref, 12); // surviving copy moves to the end
-assert.ok(jardinFixed.notes.some((n) => /Deduplicated way 12 \(outer\): it was listed 2×/.test(n.text)
-  && /removed 2 copies and added 1 back \(net −1/.test(n.text)),
-  "dedup note must state the 2x fact and the -2+1 operation, got: " + JSON.stringify(jardinFixed.notes));
+assert.ok(jardinFixed.notes.some((n) => n.text === "Dedup way 12 (outer): 2× → 1×"),
+  "dedup note must be short and targeted, got: " + JSON.stringify(jardinFixed.notes));
 assert.ok(!jardinFixed.notes.some((n) => /Removed 2 matching members/.test(n.text)),
   "old misleading remove note must be gone");
 const jardinRemoved = applyOps(jardinPre, {
   add: [], remove: [{ type: "way", ref: 12, role: "outer", roleGiven: true }], tags: {},
 });
-assert.ok(jardinRemoved.notes.some((n) => /Removed 2 copies of way 12 \(outer\) — it was listed 2×/.test(n.text)),
+assert.ok(jardinRemoved.notes.some((n) => n.text === "Removed way 12 (outer): 2× → 0×"),
   "remove-without-add-back must still state the copy count");
 
 // --- Diff view lines for a dedup: one removed copy, surviving copy kept ---
