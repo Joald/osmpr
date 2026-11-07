@@ -2428,6 +2428,16 @@ if (typeof document !== "undefined") {
         scroller.scrollLeft = scroller.scrollWidth;
         const selBtn = track.querySelector('[data-nid="' + selectedId + '"]');
         if (selBtn) selBtn.focus({ preventScroll: true });
+      } else {
+        // Rebuilds (e.g. when the background member computation
+        // finishes) replace the scroll container, resetting scrollLeft
+        // to 0. Keep the selected entry in view instead.
+        const selBtn = track.querySelector('[data-nid="' + selectedId + '"]');
+        if (selBtn) {
+          const left = selBtn.offsetLeft, right = left + selBtn.offsetWidth;
+          if (left < scroller.scrollLeft) scroller.scrollLeft = left;
+          else if (right > scroller.scrollLeft + scroller.clientWidth) scroller.scrollLeft = right - scroller.clientWidth;
+        }
       }
     }
     function emptyObjFor(v) { return { type: v.type, id: v.id, members: [], nodeRefs: [], lat: null, lon: null }; }
