@@ -73,6 +73,7 @@
   .obj { background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
   .obj h3 { margin-top: 0; }
   .hist-strip { margin: 12px 0; }
+  .mapview { padding-top: 5px; }
   ul.diff { list-style: none; padding: 0; margin: 6px 0; }
   ul.diff li { padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
   .add { color: #7ee787; }
@@ -194,7 +195,7 @@
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
-    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed).</li>
+    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed). Arrow keys ←/→ or -/= switch versions without reloading the map.</li>
   </ul>
   <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
   <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
@@ -608,6 +609,10 @@ if (typeof document !== "undefined") {
   let prefillComputed = new Map();
   let openChangesetId = null;
   let viewMode = "prefill"; // "prefill" | "changeset" | "history"
+  // Keyboard version switching for the history view: loadHistoryView
+  // installs {prev, next} closures; the document keydown listener in
+  // init() calls them only while viewMode is "history".
+  let historyNav = null;
 
   // No visible log panel: diagnostics go to the console only.
   function log(msg, cls) {
@@ -1118,7 +1123,10 @@ if (typeof document !== "undefined") {
   async function drawMapIn(div, drawables, emptyText) {
     // Shared Leaflet rendering for per-card maps and the changeset overview
     // map: drawables are {kind, pts: [{lat, lon}]} as in collectMapDrawables.
+    // Drawables live in one layer group (div._osmprMap), so redrawMapIn
+    // can swap them without recreating the map.
     div.innerHTML = "";
+    div._osmprMap = null;
     if (!drawables.length) { div.appendChild(el("p", emptyText, "muted")); return; }
     const mapDiv = document.createElement("div");
     mapDiv.style.height = "420px";
@@ -1126,43 +1134,63 @@ if (typeof document !== "undefined") {
     await loadLeaflet();
     const map = L.map(mapDiv);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
-    const bounds = [];
-    for (const d of drawables) {
-      // Last line of defence: drop points without real coordinates, so
-      // one bad drawable can never kill the whole map.
-      const pts = cleanPts(d.pts);
-      if (!pts.length) continue;
-      const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
-      const latlngs = pts.map((p) => [p.lat, p.lon]);
-      bounds.push(...latlngs);
-      if (latlngs.length === 1) { if (d.kind !== "connector") L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(map); }
-      else if (d.kind === "connector") L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(map);
-      else {
-        const first = pts[0], last = pts[pts.length - 1];
-        const closed = first.lat === last.lat && first.lon === last.lon;
-        if (closed) L.polygon(latlngs, { color, weight: 3, fillColor: color, fillOpacity: 0.15 }).addTo(map);
-        else L.polyline(latlngs, { color, weight: 3 }).addTo(map);
-      }
-    }
-    if (!bounds.length) { div.innerHTML = ""; div.appendChild(el("p", emptyText, "muted")); return; }
+    const layers = L.layerGroup().addTo(map);
+    const bounds = addDrawablesToLayer(layers, drawables);
+    if (!bounds.length) { map.remove(); div.innerHTML = ""; div.appendChild(el("p", emptyText, "muted")); return; }
     map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
     map.invalidateSize();
+    div._osmprMap = { map, layers };
+  }
+  async function redrawMapIn(div, drawables, emptyText) {
+    // Swap only the drawn geometry in the existing Leaflet map: tiles
+    // stay cached and the viewport stays put. The view refits only when
+    // the new geometry leaves the current viewport. Falls back to a fresh
+    // map when none exists yet (or the previous draw had no geometry).
+    const state = div._osmprMap;
+    if (!state || !state.map) { await drawMapIn(div, drawables, emptyText); return; }
+    const { map, layers } = state;
+    layers.clearLayers();
+    const bounds = addDrawablesToLayer(layers, drawables);
+    if (!bounds.length) {
+      map.remove();
+      div._osmprMap = null;
+      div.innerHTML = "";
+      div.appendChild(el("p", emptyText, "muted"));
+      return;
+    }
+    if (!map.getBounds().contains(L.latLngBounds(bounds))) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
   }
   function buildMapView(oldObj, newObj, bounds) {
     const div = document.createElement("div");
+    div.className = "mapview";
     div.hidden = true;
     div.appendChild(el("p", "Loading map…", "muted"));
-    let loaded = false;
-    div.load = async () => {
-      if (loaded) return;
-      loaded = true;
+    let loadPromise = null;
+    let seq = 0;
+    const render = async (o, n, b) => {
+      const mySeq = ++seq;
       try {
-        const drawables = await collectMapDrawables(oldObj, newObj, bounds);
-        await drawMapIn(div, drawables, "No drawable geometry for this object.");
+        const drawables = await collectMapDrawables(o, n, b);
+        if (mySeq !== seq) return; // superseded by a newer version switch
+        await redrawMapIn(div, drawables, "No drawable geometry for this object.");
       } catch (e) {
+        if (mySeq !== seq) return;
+        if (div._osmprMap) div._osmprMap.map.remove();
         div.innerHTML = "";
+        div._osmprMap = null;
         div.appendChild(el("p", "Map failed to load: " + e.message, "del"));
       }
+    };
+    div.load = () => {
+      if (!loadPromise) loadPromise = render(oldObj, newObj, bounds);
+      return loadPromise;
+    };
+    // Re-collect geometry for another old/new pair and redraw it in the
+    // same map. Waits for the first load, so the map exists by the time
+    // the redraw runs; rapid switches queue up and the last one wins.
+    div.reload = (o, n, b) => {
+      loadPromise = (loadPromise || render(oldObj, newObj, bounds)).then(() => render(o, n, b));
+      return loadPromise;
     };
     return div;
   }
@@ -1401,7 +1429,7 @@ if (typeof document !== "undefined") {
   }
   function buildOverviewMapView(pairs, cache, getCard, changesetId) {
     const div = document.createElement("div");
-    div.className = "panel";
+    div.className = "panel mapview";
     div.appendChild(el("p", "Loading overview map…", "muted"));
     // The map is created once; refreshes only replace its layers, so a
     // user panning or zooming is not reset by every progressive update.
@@ -2095,32 +2123,61 @@ if (typeof document !== "undefined") {
         const v = versions[i];
         const btn = el("button", "v" + v.version, i === selected ? null : "secondary");
         btn.type = "button";
-        btn.addEventListener("click", () => { selected = i; renderList(); renderDetail(); });
+        btn.addEventListener("click", () => selectVersion(i));
         strip.appendChild(btn);
       }
       listWrap.appendChild(strip);
     }
     function emptyObjFor(v) { return { type: v.type, id: v.id, members: [], nodeRefs: [], lat: null, lon: null }; }
+    // The detail card and its map are built once: switching versions only
+    // updates the header, nav, change/state sections, and the drawn
+    // polygon (via mapView.reload), so the Leaflet map is never recreated.
+    let card = null, headEl = null, prevBtn = null, nextBtn = null;
+    let noteSlot = null, mapSlot = null, changesSlot = null, stateSlot = null;
+    let mapView = null;
+    function selectVersion(i) {
+      const next = Math.max(0, Math.min(versions.length - 1, i));
+      if (next === selected) return;
+      selected = next;
+      renderList();
+      renderDetail();
+    }
+    // Keyboard switching for this history view (see the document keydown
+    // listener in init): ArrowLeft / "-" = older version, ArrowRight /
+    // "=" / "+" = newer version.
+    historyNav = { prev: () => selectVersion(selected - 1), next: () => selectVersion(selected + 1) };
     function renderDetail() {
-      detailWrap.innerHTML = "";
       const cur = versions[selected];
       const prev = selected > 0 ? versions[selected - 1] : null;
-      const card = el("div", null, "obj");
-      const h = el("h3", null);
-      h.appendChild(document.createTextNode("Version " + cur.version + " | " + fmtDate(cur.timestamp) + " | " + (cur.user || "?") + " | changeset "));
-      h.appendChild(changesetLink(cur.changeset));
-      card.appendChild(h);
-      const nav = el("div", null, "row");
-      const prevBtn = el("button", "Previous version", "secondary"); prevBtn.type = "button";
-      const nextBtn = el("button", "Next version", "secondary"); nextBtn.type = "button";
+      if (!card) {
+        card = el("div", null, "obj");
+        headEl = el("h3", null);
+        const nav = el("div", null, "row");
+        prevBtn = el("button", "Previous version", "secondary"); prevBtn.type = "button";
+        nextBtn = el("button", "Next version", "secondary"); nextBtn.type = "button";
+        prevBtn.addEventListener("click", () => selectVersion(selected - 1));
+        nextBtn.addEventListener("click", () => selectVersion(selected + 1));
+        nav.appendChild(prevBtn);
+        nav.appendChild(nextBtn);
+        noteSlot = document.createElement("div");
+        mapSlot = document.createElement("div");
+        changesSlot = document.createElement("div");
+        stateSlot = document.createElement("div");
+        card.appendChild(headEl);
+        card.appendChild(nav);
+        card.appendChild(noteSlot);
+        card.appendChild(mapSlot);
+        card.appendChild(changesSlot);
+        card.appendChild(stateSlot);
+        detailWrap.appendChild(card);
+      }
+      headEl.innerHTML = "";
+      headEl.appendChild(document.createTextNode("Version " + cur.version + " | " + fmtDate(cur.timestamp) + " | " + (cur.user || "?") + " | changeset "));
+      headEl.appendChild(changesetLink(cur.changeset));
       prevBtn.disabled = selected <= 0;
       nextBtn.disabled = selected >= versions.length - 1;
-      prevBtn.addEventListener("click", () => { selected--; renderList(); renderDetail(); });
-      nextBtn.addEventListener("click", () => { selected++; renderList(); renderDetail(); });
-      nav.appendChild(prevBtn);
-      nav.appendChild(nextBtn);
-      card.appendChild(nav);
-      if (!cur.visible) card.appendChild(el("p", "This version deleted the object.", "del"));
+      noteSlot.innerHTML = "";
+      if (!cur.visible) noteSlot.appendChild(el("p", "This version deleted the object.", "del"));
       // Map directly under the prev/next navigation, with the change
       // and state sections below it. Geometry resolves as of each
       // side's changeset, so the map shows the state at the moment of
@@ -2130,9 +2187,14 @@ if (typeof document !== "undefined") {
       const histBounds = (cur.changeset != null && (!prev || prev.changeset != null))
         ? { old: prev ? { changeset: prev.changeset, inclusive: true } : null, new: { changeset: cur.changeset, inclusive: true } }
         : null;
-      const mapView = buildMapView(oldObj, newObj, histBounds);
-      mapView.hidden = false;
-      card.appendChild(mapView);
+      if (!mapView) {
+        mapView = buildMapView(oldObj, newObj, histBounds);
+        mapView.hidden = false;
+        mapSlot.appendChild(mapView);
+        mapView.load();
+      } else {
+        mapView.reload(oldObj, newObj, histBounds);
+      }
       const s = historyChangeSummary(prev, cur);
       const ch = document.createElement("div");
       if (s.kind === "created") ch.appendChild(el("p", "Object created in this version.", "muted"));
@@ -2153,7 +2215,8 @@ if (typeof document !== "undefined") {
         const gp = geometryPreview(prev, cur);
         if (gp) ch.appendChild(gp);
       }
-      card.appendChild(section("Changes in this version:", [ch]));
+      changesSlot.innerHTML = "";
+      changesSlot.appendChild(section("Changes in this version:", [ch]));
       const state = document.createElement("div");
       const tagUl = el("ul", null, "diff");
       for (const k of Object.keys(cur.tags || {}).sort()) {
@@ -2173,9 +2236,8 @@ if (typeof document !== "undefined") {
       } else if (cur.type === "node") {
         state.appendChild(el("p", "Position: " + cur.lat + ", " + cur.lon, "muted"));
       }
-      card.appendChild(section("State in this version:", [state]));
-      detailWrap.appendChild(card);
-      mapView.load();
+      stateSlot.innerHTML = "";
+      stateSlot.appendChild(section("State in this version:", [state]));
     }
     renderList();
     renderDetail();
@@ -2321,6 +2383,15 @@ if (typeof document !== "undefined") {
         history.replaceState(null, "", "?history=" + go.type + ":" + go.id);
         loadHistoryView(go.type, go.id);
       }
+    });
+    document.addEventListener("keydown", (e) => {
+      // History view only: ArrowLeft / "-" = older version, ArrowRight /
+      // "=" / "+" = newer version. Never hijack keys while typing.
+      if (viewMode !== "history" || !historyNav) return;
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return;
+      if (e.key === "ArrowLeft" || e.key === "-") { e.preventDefault(); historyNav.prev(); }
+      else if (e.key === "ArrowRight" || e.key === "=" || e.key === "+") { e.preventDefault(); historyNav.next(); }
     });
     const histParam = new URLSearchParams(location.search).get("history");
     if (histParam) {
