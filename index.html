@@ -2143,9 +2143,11 @@ if (typeof document !== "undefined") {
       renderDetail();
     }
     // Keyboard switching for this history view (see the document keydown
-    // listener in init): ArrowLeft / "-" = older version, ArrowRight /
-    // "=" / "+" = newer version.
-    historyNav = { prev: () => selectVersion(selected - 1), next: () => selectVersion(selected + 1) };
+    // listener in init). Directions follow the version strip, which runs
+    // newest-first left to right: ArrowLeft / "-" = newer version (left
+    // in the strip), ArrowRight / "=" / "+" = older version (right in
+    // the strip).
+    historyNav = { newer: () => selectVersion(selected + 1), older: () => selectVersion(selected - 1) };
     function renderDetail() {
       const cur = versions[selected];
       const prev = selected > 0 ? versions[selected - 1] : null;
@@ -2157,8 +2159,10 @@ if (typeof document !== "undefined") {
         nextBtn = el("button", "Next version", "secondary"); nextBtn.type = "button";
         prevBtn.addEventListener("click", () => selectVersion(selected - 1));
         nextBtn.addEventListener("click", () => selectVersion(selected + 1));
-        nav.appendChild(prevBtn);
+        // Button order follows the version strip (newest first, left to
+        // right), like the arrow keys: newer on the left, older on the right.
         nav.appendChild(nextBtn);
+        nav.appendChild(prevBtn);
         noteSlot = document.createElement("div");
         mapSlot = document.createElement("div");
         changesSlot = document.createElement("div");
@@ -2385,13 +2389,14 @@ if (typeof document !== "undefined") {
       }
     });
     document.addEventListener("keydown", (e) => {
-      // History view only: ArrowLeft / "-" = older version, ArrowRight /
-      // "=" / "+" = newer version. Never hijack keys while typing.
+      // History view only, following the version strip (newest first, left
+      // to right): ArrowLeft / "-" = newer version, ArrowRight / "=" / "+"
+      // = older version. Never hijack keys while typing.
       if (viewMode !== "history" || !historyNav) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return;
-      if (e.key === "ArrowLeft" || e.key === "-") { e.preventDefault(); historyNav.prev(); }
-      else if (e.key === "ArrowRight" || e.key === "=" || e.key === "+") { e.preventDefault(); historyNav.next(); }
+      if (e.key === "ArrowLeft" || e.key === "-") { e.preventDefault(); historyNav.newer(); }
+      else if (e.key === "ArrowRight" || e.key === "=" || e.key === "+") { e.preventDefault(); historyNav.older(); }
     });
     const histParam = new URLSearchParams(location.search).get("history");
     if (histParam) {
