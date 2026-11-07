@@ -72,7 +72,25 @@
   textarea { background: #121417; color: #e8e8e8; border: 1px solid #3a3f44; border-radius: 8px; padding: 8px 10px; width: 100%; }
   .obj { background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
   .obj h3 { margin-top: 0; }
-  .hist-strip { margin: 12px 0; }
+  .tl-scroll { overflow-x: auto; padding: 8px; background: #1a1d21; border: 1px solid #2a2e33; border-radius: 10px; }
+  .hist-track { position: relative; display: flex; min-width: max-content; }
+  .hist-track::before { content: ""; position: absolute; left: 20px; right: 20px; top: 43px; height: 2px; background: #3a3f44; }
+  .hist-node { position: relative; width: 124px; flex: 0 0 124px; text-align: center; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0 2px; }
+  .hist-node .hist-top { height: 30px; font-weight: 600; font-size: 0.9rem; display: flex; align-items: flex-end; justify-content: center; }
+  .hist-node .hist-mid { height: 26px; display: flex; align-items: center; justify-content: center; }
+  .hist-node .hist-dot { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #121417; position: relative; z-index: 1; }
+  .hist-node.hist-member .hist-dot { width: 10px; height: 10px; background: #121417; border: 2px solid #e3b341; }
+  .hist-node.hist-member .hist-top { font-size: 0.8rem; color: #e3b341; }
+  .hist-node .hist-date { height: 18px; font-size: 0.8rem; color: #9aa0a6; }
+  .hist-node.hist-sel .hist-dot { box-shadow: 0 0 0 3px rgba(126,231,135,0.55); }
+  .hist-node.hist-sel .hist-top { color: #7ee787; }
+  .hist-node:focus-visible, .hist-gap:focus-visible { outline: 2px solid #7ee787; outline-offset: 2px; border-radius: 8px; }
+  .hist-gap { position: relative; width: 40px; flex: 0 0 40px; background: none; border: 0; cursor: pointer; padding: 0; }
+  .hist-gap .hist-top { height: 30px; }
+  .hist-gap .hist-date { height: 18px; }
+  .hist-gap .hist-mid { height: 26px; display: flex; align-items: center; justify-content: center; }
+  .hist-gap .hist-plus { width: 22px; height: 22px; border-radius: 50%; border: 1px solid #9aa0a6; color: #e8e8e8; font-size: 15px; line-height: 20px; text-align: center; position: relative; z-index: 1; background: #1a1d21; }
+  .hist-gap:hover .hist-plus { border-color: #fff; color: #fff; }
   .mapview { padding-top: 5px; }
   ul.diff { list-style: none; padding: 0; margin: 6px 0; }
   ul.diff li { padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
@@ -195,7 +213,7 @@
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
-    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Click a version to see its changes and map; the map draws the version against the previous one (gray unchanged, green added, red removed). Arrow keys ←/→ or -/= switch versions without reloading the map.</li>
+    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Versions run oldest to newest along a timeline (version above, date below); click a version to see its changes and map. The map draws the version against the previous one (gray unchanged, green added, red removed). Arrow keys ←/→ or -/= switch entries without reloading the map. For relations, Show all member changes reveals geometry changes to member ways between versions, with + to expand one gap at a time.</li>
   </ul>
   <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
   <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
@@ -357,6 +375,95 @@ function historyChangeSummary(prev, cur) {
   if (cur.type === "node") geometryChanged = prev.lat !== cur.lat || prev.lon !== cur.lon;
   else if (cur.type === "way") geometryChanged = JSON.stringify(prev.nodeRefs) !== JSON.stringify(cur.nodeRefs);
   return { kind: "changed", addedMembers: dm.added.length, removedMembers: dm.removed.length, tagChanges: dt.length, geometryChanged };
+}
+const MEMBER_CHANGE_MAX_WAYS = 200;
+const MEMBER_CHANGE_MAX_NODES = 1000;
+function computeMemberGeometryEvents(versions, wayHist, nodeHist) {
+  // Pure geometry comparison for relation history: which member ways
+  // changed shape between consecutive relation versions, and in which
+  // changeset. versions are normalized history elements (ascending);
+  // wayHist/nodeHist map id -> raw history.json elements (ascending).
+  // Returns { gaps: Map<gapIndex, events[]>, versionDetails: Map<vi, details[]>, partial }.
+  // An event is {way, kind: "refs"|"moved", detail, changeset, timestamp, gap}.
+  // Events in the same changeset as the newer version attach to that
+  // version (versionDetails); the rest are standalone gap events.
+  // Refs changes are exact; node moves need complete node histories on
+  // both sides, otherwise the way is skipped for that gap (no false
+  // positives). Ways/nodes missing from the histories are skipped.
+  const gaps = new Map(), versionDetails = new Map();
+  let partial = false;
+  const seenWays = [];
+  for (const v of versions || []) {
+    for (const m of v.members || []) {
+      if (m.type === "way" && Number.isFinite(m.ref) && m.ref >= 0 && !seenWays.includes(m.ref)) seenWays.push(m.ref);
+    }
+  }
+  const ways = seenWays.slice(0, MEMBER_CHANGE_MAX_WAYS);
+  if (seenWays.length > ways.length) partial = true;
+  const nodeIds = [];
+  for (const wid of ways) {
+    for (const e of wayHist.get(wid) || []) {
+      for (const nid of e.nodes || []) if (!nodeIds.includes(nid)) nodeIds.push(nid);
+    }
+  }
+  const nodes = nodeIds.slice(0, MEMBER_CHANGE_MAX_NODES);
+  if (nodeIds.length > nodes.length) partial = true;
+  const nodeSet = new Set(nodes);
+  const geomAt = (wid, boundCs) => {
+    const wv = pickVersionAtChangeset(wayHist.get(wid), boundCs, true);
+    if (!wv || !Array.isArray(wv.nodes)) return null;
+    const refs = wv.nodes;
+    const coords = new Map();
+    let complete = true;
+    for (const nid of refs) {
+      if (!nodeSet.has(nid) || !nodeHist.has(nid)) { complete = false; break; }
+      const nv = pickVersionAtChangeset(nodeHist.get(nid), boundCs, true);
+      if (!nv) { coords.set(nid, null); continue; }
+      coords.set(nid, (nv.visible === false || nv.lat == null || nv.lon == null) ? null : { lat: nv.lat, lon: nv.lon });
+    }
+    return { refs, coords, complete, wv };
+  };
+  for (let i = 1; i < (versions || []).length; i++) {
+    const prev = versions[i - 1], cur = versions[i];
+    if (!Number.isFinite(prev.changeset) || !Number.isFinite(cur.changeset)) continue;
+    const prevKeys = new Set((prev.members || []).map(memberKey));
+    const curKeys = new Set((cur.members || []).map(memberKey));
+    const place = (ev) => {
+      if (ev.changeset === cur.changeset) {
+        if (!versionDetails.has(i)) versionDetails.set(i, []);
+        versionDetails.get(i).push({ way: ev.way, detail: ev.detail, changeset: ev.changeset });
+      } else {
+        if (!gaps.has(i - 1)) gaps.set(i - 1, []);
+        gaps.get(i - 1).push(ev);
+      }
+    };
+    for (const k of prevKeys) {
+      if (!curKeys.has(k) || !k.startsWith("way:")) continue;
+      const wid = parseInt(k.split(":")[1], 10);
+      if (!ways.includes(wid)) continue;
+      const a = geomAt(wid, prev.changeset), b = geomAt(wid, cur.changeset);
+      if (!a || !b) continue;
+      if (JSON.stringify(a.refs) === JSON.stringify(b.refs)) {
+        if (!a.complete || !b.complete) continue;
+        const moved = [];
+        for (const nid of a.refs) {
+          if (JSON.stringify(a.coords.get(nid)) !== JSON.stringify(b.coords.get(nid))) moved.push(nid);
+        }
+        if (!moved.length) continue;
+        let cs = -1, ts = "";
+        for (const nid of moved) {
+          const nv = pickVersionAtChangeset(nodeHist.get(nid), cur.changeset, true);
+          if (nv && Number.isFinite(nv.changeset) && nv.changeset > cs) { cs = nv.changeset; ts = nv.timestamp || ""; }
+        }
+        if (cs < 0) continue;
+        place({ way: wid, kind: "moved", detail: "node positions moved (same refs)", changeset: cs, timestamp: ts, gap: i - 1 });
+      } else {
+        place({ way: wid, kind: "refs", detail: "nodes " + a.refs.length + " → " + b.refs.length + " (way v" + a.wv.version + " → v" + b.wv.version + ")", changeset: b.wv.changeset, timestamp: b.wv.timestamp || "", gap: i - 1 });
+      }
+    }
+  }
+  for (const list of gaps.values()) list.sort((x, y) => (x.changeset - y.changeset) || (x.way - y.way));
+  return { gaps, versionDetails, partial };
 }
 function applyOps(current, ops) {
   const notes = [];
@@ -888,6 +995,40 @@ if (typeof document !== "undefined") {
     if (!res.ok) throw new Error("History fetch failed (" + res.status + ") for " + type + " " + id + ".");
     return (await res.json()).elements || [];
   }
+  async function fetchAllChunked(items, fn, size) {
+    // Parallel fetches in chunks; a failed item resolves to null instead
+    // of failing the whole batch.
+    const out = new Map();
+    for (let i = 0; i < items.length; i += size) {
+      const chunk = items.slice(i, i + size);
+      const results = await Promise.all(chunk.map(async (it) => {
+        try { return [it, await fn(it)]; } catch (e) { return [it, null]; }
+      }));
+      for (const [it, res] of results) if (res) out.set(it, res);
+    }
+    return out;
+  }
+  async function computeRelationMemberChanges(versions) {
+    // Fetch each member way history and each involved node history once
+    // (parallel chunks), then run the pure geometry comparison.
+    const seenWays = [];
+    for (const v of versions || []) {
+      for (const m of v.members || []) {
+        if (m.type === "way" && Number.isFinite(m.ref) && m.ref >= 0 && !seenWays.includes(m.ref)) seenWays.push(m.ref);
+      }
+    }
+    const ways = seenWays.slice(0, MEMBER_CHANGE_MAX_WAYS);
+    const wayHist = await fetchAllChunked(ways, (wid) => fetchHistoryElements("way", wid), 10);
+    const nodeIds = [];
+    for (const wid of ways) {
+      for (const e of wayHist.get(wid) || []) {
+        for (const nid of e.nodes || []) if (!nodeIds.includes(nid)) nodeIds.push(nid);
+      }
+    }
+    const nodes = nodeIds.slice(0, MEMBER_CHANGE_MAX_NODES);
+    const nodeHist = await fetchAllChunked(nodes, (nid) => fetchHistoryElements("node", nid), 10);
+    return computeMemberGeometryEvents(versions, wayHist, nodeHist);
+  }
   function boundOk(cs, bound) {
     return !!bound && Number.isFinite(cs) && (bound.inclusive ? cs <= bound.changeset : cs < bound.changeset);
   }
@@ -955,7 +1096,38 @@ if (typeof document !== "undefined") {
     }
     return { members, wayNodes, nodeCoords };
   }
-  async function collectMapDrawables(oldObj, newObj, bounds) {
+  function waySegmentDiffDrawables(oldRefs, oldCoords, newRefs, newCoords) {
+    // Segment-level diff of one way between two sides: consecutive node
+    // pairs matched as a multiset; common segments unchanged, the rest
+    // removed (old side) / added (new side). Returns null when either
+    // side has no segments to compare.
+    if (!oldRefs || !newRefs || !oldCoords || !newCoords) return null;
+    const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
+    const waySegments = (refs, coords) => {
+      const segs = [];
+      for (let k = 0; k + 1 < (refs || []).length; k++) {
+        const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
+        if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), pts: [a, b] });
+      }
+      return segs;
+    };
+    const oldSegs = waySegments(oldRefs, oldCoords), newSegs = waySegments(newRefs, newCoords);
+    if (!oldSegs.length && !newSegs.length) return null;
+    const out = [];
+    const newCounts = new Map();
+    for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
+    const matched = new Map();
+    for (const s of oldSegs) {
+      if ((newCounts.get(s.key) || 0) > 0) { newCounts.set(s.key, newCounts.get(s.key) - 1); matched.set(s.key, (matched.get(s.key) || 0) + 1); }
+      else out.push({ kind: "removed", pts: s.pts });
+    }
+    for (const s of newSegs) {
+      if ((matched.get(s.key) || 0) > 0) { matched.set(s.key, matched.get(s.key) - 1); out.push({ kind: "unchanged", pts: s.pts }); }
+      else out.push({ kind: "added", pts: s.pts });
+    }
+    return out;
+  }
+  async function collectMapDrawables(oldObj, newObj, bounds, opts) {
     // Drawables: {kind, pts: [{lat, lon}]}. kind: unchanged | added | removed | old | new | connector.
     // bounds null = live preview (prefill cards): geometry comes from
     // current fetches. bounds {old, new} = version views: every member
@@ -994,34 +1166,15 @@ if (typeof document !== "undefined") {
       if (changed) {
         // Segment-level diff, as in the overview map: full old/new
         // polylines hide the old under the new wherever nothing
-        // changed. Match consecutive node pairs as a multiset. Old and
-        // new segments use their own side's coordinates, so a node
-        // moved between the versions draws as removed + added.
-        const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
-        const waySegments = (refs, coords) => {
-          const segs = [];
-          for (let k = 0; k + 1 < (refs || []).length; k++) {
-            const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
-            if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), pts: [a, b] });
-          }
-          return segs;
-        };
-        const oldSegs = waySegments(oldObj.nodeRefs, coordsOld), newSegs = waySegments(newObj.nodeRefs, coordsNew);
-        const newCounts = new Map();
-        for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
-        const matched = new Map();
-        for (const s of oldSegs) {
-          if ((newCounts.get(s.key) || 0) > 0) { newCounts.set(s.key, newCounts.get(s.key) - 1); matched.set(s.key, (matched.get(s.key) || 0) + 1); }
-          else drawables.push({ kind: "removed", pts: s.pts });
-        }
-        for (const s of newSegs) {
-          if ((matched.get(s.key) || 0) > 0) { matched.set(s.key, matched.get(s.key) - 1); drawables.push({ kind: "unchanged", pts: s.pts }); }
-          else drawables.push({ kind: "added", pts: s.pts });
-        }
+        // changed. Old and new segments use their own side's
+        // coordinates, so a node moved between the versions draws as
+        // removed + added.
+        const segs = waySegmentDiffDrawables(oldObj.nodeRefs, coordsOld, newObj.nodeRefs, coordsNew);
+        if (segs) drawables.push(...segs);
       } else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
     } else if (type === "relation") {
       const budget = { remaining: 1000 };
-      let geomOld, geomNew;
+      let geomOld, geomNew, oldSide = null, newSide = null;
       if (!bounds) {
         // Live preview: current full object plus individually fetched
         // member ways, as before. A deleted relation has no current
@@ -1067,27 +1220,30 @@ if (typeof document !== "undefined") {
         // external-way cap.
         const sideGeom = async (members, bound) => {
           const geom = new Map();
-          if (!bound) return geom;
+          const refsByWay = new Map(), coords = new Map();
+          if (!bound) return { geom, refsByWay, coords };
           const ways = [];
           for (const m of members || []) {
             if (m.type === "way" && m.ref >= 0 && !ways.includes(m.ref)) ways.push(m.ref);
           }
-          const refsByWay = new Map();
           for (const wid of ways.slice(0, 200)) {
             const refs = await fetchWayRefsAtBound(wid, bound, budget);
             if (refs) refsByWay.set(wid, refs);
           }
           const nodeIds = [...new Set([...refsByWay.values()].flat())];
           const currentMap = await fetchNodeCoordsWithChangesets(nodeIds);
-          const coords = await resolveCoordsAtBound(nodeIds, currentMap, bound, budget);
+          const resolved = await resolveCoordsAtBound(nodeIds, currentMap, bound, budget);
+          for (const [k, v] of resolved) coords.set(k, v);
           for (const [wid, refs] of refsByWay) {
             const pts = refs.map((r) => coords.get(r)).filter(hasCoords);
             if (pts.length >= 2) geom.set(wid, pts);
           }
-          return geom;
+          return { geom, refsByWay, coords };
         };
-        geomOld = await sideGeom(oldObj.members, bounds.old);
-        geomNew = await sideGeom(newObj.members, bounds.new);
+        oldSide = await sideGeom(oldObj.members, bounds.old);
+        newSide = await sideGeom(newObj.members, bounds.new);
+        geomOld = oldSide.geom;
+        geomNew = newSide.geom;
       }
       const oldKeys = new Set((oldObj.members || []).map(memberKey));
       const newKeys = new Set((newObj.members || []).map(memberKey));
@@ -1096,7 +1252,20 @@ if (typeof document !== "undefined") {
         const pts = geom.get(m.ref);
         if (pts) drawables.push({ kind, pts });
       };
-      for (const m of newObj.members || []) if (oldKeys.has(memberKey(m))) pushMember(m, "unchanged", geomNew);
+      // opts.highlightWay (member-change view): one unchanged member
+      // whose geometry changed under the relation gets a segment-level
+      // diff instead of a plain gray line, so a reshaped member reads
+      // as removed + added rather than unchanged.
+      const hl = opts && opts.highlightWay;
+      for (const m of newObj.members || []) {
+        if (!oldKeys.has(memberKey(m))) continue;
+        if (m.type !== "way") continue;
+        if (hl && m.ref === hl && oldSide && newSide) {
+          const segs = waySegmentDiffDrawables(oldSide.refsByWay.get(m.ref), oldSide.coords, newSide.refsByWay.get(m.ref), newSide.coords);
+          if (segs) { drawables.push(...segs); continue; }
+        }
+        pushMember(m, "unchanged", geomNew);
+      }
       for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m))) pushMember(m, "removed", geomOld);
       for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m))) pushMember(m, "added", geomNew);
     }
@@ -1167,10 +1336,10 @@ if (typeof document !== "undefined") {
     div.appendChild(el("p", "Loading map…", "muted"));
     let loadPromise = null;
     let seq = 0;
-    const render = async (o, n, b) => {
+    const render = async (o, n, b, opts) => {
       const mySeq = ++seq;
       try {
-        const drawables = await collectMapDrawables(o, n, b);
+        const drawables = await collectMapDrawables(o, n, b, opts);
         if (mySeq !== seq) return; // superseded by a newer version switch
         await redrawMapIn(div, drawables, "No drawable geometry for this object.");
       } catch (e) {
@@ -1188,8 +1357,9 @@ if (typeof document !== "undefined") {
     // Re-collect geometry for another old/new pair and redraw it in the
     // same map. Waits for the first load, so the map exists by the time
     // the redraw runs; rapid switches queue up and the last one wins.
-    div.reload = (o, n, b) => {
-      loadPromise = (loadPromise || render(oldObj, newObj, bounds)).then(() => render(o, n, b));
+    // opts (e.g. {highlightWay}) flows through to collectMapDrawables.
+    div.reload = (o, n, b, opts) => {
+      loadPromise = (loadPromise || render(oldObj, newObj, bounds)).then(() => render(o, n, b, opts));
       return loadPromise;
     };
     return div;
@@ -2098,14 +2268,28 @@ if (typeof document !== "undefined") {
     preview.innerHTML = "";
     const title = el("p", null, "muted");
     title.appendChild(displayNameEl(type, id, latest.tags && latest.tags.name));
-    title.appendChild(document.createTextNode(" - " + versions.length + " version" + (versions.length === 1 ? "" : "s") + (latest.visible ? "" : " (currently deleted)") + ". Click a version to see its changes and map."));
+    title.appendChild(document.createTextNode(" - " + versions.length + " version" + (versions.length === 1 ? "" : "s") + (latest.visible ? "" : " (currently deleted)") + ". Click a version or a member change to see its changes and map."));
     preview.appendChild(title);
-    let selected = versions.length - 1;
+    // Timeline entries: relation versions oldest first, with member
+    // geometry changes (relations only) inserted into the gap they
+    // belong to once expanded. Selection is by stable entry id, so
+    // collapsing a gap falls back to the older surrounding version.
+    let selectedId = "v" + (versions.length - 1);
+    let selectedGap = null;
+    let entries = [];
+    let memberGaps = null; // Map<gapVi, events[]> once computed
+    let versionMemberDetails = new Map();
+    let memberFailed = false;
+    let memberPartial = false;
+    let expandedGaps = new Set();
+    let scrolledToEnd = false;
+    let lastScroller = null, lastTrack = null;
     const listWrap = document.createElement("div");
     const detailWrap = document.createElement("div");
     preview.appendChild(listWrap);
     preview.appendChild(detailWrap);
     function fmtDate(ts) { return (ts || "").slice(0, 10); }
+    function fmtTs(ts) { return (ts || "").replace("T", " ").replace("Z", " UTC"); }
     function changesetLink(cs) {
       if (!cs) return document.createTextNode("(no changeset)");
       const a = document.createElement("a");
@@ -2113,20 +2297,138 @@ if (typeof document !== "undefined") {
       a.textContent = cs;
       return a;
     }
-    function renderList() {
-      // Horizontal strip of version chips, newest first, labels only.
-      // Dates, users, changesets, and change summaries live in the detail
-      // card for the selected version.
-      listWrap.innerHTML = "";
-      const strip = el("div", null, "row hist-strip");
-      for (let i = versions.length - 1; i >= 0; i--) {
-        const v = versions[i];
-        const btn = el("button", "v" + v.version, i === selected ? null : "secondary");
-        btn.type = "button";
-        btn.addEventListener("click", () => selectVersion(i));
-        strip.appendChild(btn);
+    function buildEntries() {
+      const list = [];
+      for (let vi = 0; vi < versions.length; vi++) {
+        list.push({ id: "v" + vi, kind: "version", vi });
+        if (vi < versions.length - 1 && memberGaps && expandedGaps.has(vi)) {
+          for (const ev of memberGaps.get(vi) || []) list.push({ id: "m" + ev.way + "@" + ev.changeset, kind: "member", gap: vi, ev });
+        }
       }
-      listWrap.appendChild(strip);
+      return list;
+    }
+    function entryIndex(id) { return entries.findIndex((e) => e.id === id); }
+    function selectEntry(j) {
+      const next = Math.max(0, Math.min(entries.length - 1, j));
+      const e = entries[next];
+      if (!e || e.id === selectedId) return;
+      selectedId = e.id;
+      selectedGap = e.kind === "member" ? [e.gap, e.gap + 1] : null;
+      renderList();
+      renderDetail();
+    }
+    function versionNode(v, vi) {
+      const b = el("button", null, "hist-node" + (selectedId === "v" + vi ? " hist-sel" : ""));
+      b.type = "button";
+      b.dataset.nid = "v" + vi;
+      const top = el("div", "v" + v.version, "hist-top");
+      top.title = "Changeset " + v.changeset + " · " + (v.user || "?") + (v.type === "relation" ? " · " + (v.members || []).length + " members" : "");
+      const mid = el("div", null, "hist-mid");
+      mid.appendChild(el("div", null, "hist-dot"));
+      const date = el("div", fmtDate(v.timestamp), "hist-date");
+      date.title = fmtTs(v.timestamp);
+      b.appendChild(top);
+      b.appendChild(mid);
+      b.appendChild(date);
+      b.addEventListener("click", () => selectEntry(entryIndex("v" + vi)));
+      return b;
+    }
+    function memberNode(ev, gap) {
+      const id = "m" + ev.way + "@" + ev.changeset;
+      const b = el("button", null, "hist-node hist-member" + (selectedId === id ? " hist-sel" : ""));
+      b.type = "button";
+      b.dataset.nid = id;
+      const vm = ev.detail.match(/way v\d+ → v(\d+)/);
+      const top = el("div", "way " + ev.way + (vm ? " v" + vm[1] : ""), "hist-top");
+      top.title = "Changeset " + ev.changeset + " · way " + ev.way + " · " + ev.detail;
+      const mid = el("div", null, "hist-mid");
+      mid.appendChild(el("div", null, "hist-dot"));
+      const date = el("div", fmtDate(ev.timestamp), "hist-date");
+      date.title = fmtTs(ev.timestamp);
+      b.appendChild(top);
+      b.appendChild(mid);
+      b.appendChild(date);
+      b.addEventListener("click", () => selectEntry(entryIndex(id)));
+      return b;
+    }
+    function scrollToGap(gap) {
+      if (!lastScroller || !lastTrack) return;
+      const leftEl = lastTrack.querySelector('[data-nid="v' + gap + '"]');
+      const rightEl = lastTrack.querySelector('[data-nid="v' + (gap + 1) + '"]');
+      if (!leftEl || !rightEl) return;
+      const groupLeft = leftEl.offsetLeft;
+      const groupRight = rightEl.offsetLeft + rightEl.offsetWidth;
+      const vw = lastScroller.clientWidth;
+      if (groupRight - groupLeft <= vw) {
+        if (groupLeft < lastScroller.scrollLeft) lastScroller.scrollTo({ left: groupLeft, behavior: "smooth" });
+        else if (groupRight > lastScroller.scrollLeft + vw) lastScroller.scrollTo({ left: groupRight - vw, behavior: "smooth" });
+      } else {
+        lastScroller.scrollTo({ left: groupLeft, behavior: "smooth" });
+      }
+    }
+    function renderList() {
+      entries = buildEntries();
+      if (!entries.some((e) => e.id === selectedId)) {
+        selectedId = selectedGap ? "v" + selectedGap[0] : "v" + (versions.length - 1);
+        selectedGap = null;
+      }
+      listWrap.innerHTML = "";
+      if (type === "relation") {
+        const row = el("div", null, "row");
+        const toggleBtn = el("button", expandedGaps.size > 0 ? "Hide all member changes" : "Show all member changes", "secondary");
+        toggleBtn.type = "button";
+        toggleBtn.disabled = memberGaps === null;
+        if (memberGaps === null) toggleBtn.title = memberFailed ? "Member changes unavailable" : "Computing member changes…";
+        else if (memberPartial) toggleBtn.title = "Member changes computed for the first 200 member ways";
+        toggleBtn.addEventListener("click", () => {
+          if (expandedGaps.size > 0) expandedGaps.clear();
+          else for (const k of memberGaps.keys()) expandedGaps.add(k);
+          renderList();
+          renderDetail();
+        });
+        row.appendChild(toggleBtn);
+        listWrap.appendChild(row);
+      }
+      const scroller = el("div", null, "tl-scroll");
+      const track = el("div", null, "hist-track");
+      for (let vi = 0; vi < versions.length; vi++) {
+        track.appendChild(versionNode(versions[vi], vi));
+        if (vi < versions.length - 1) {
+          const gapEvents = memberGaps ? (memberGaps.get(vi) || []) : [];
+          if (!gapEvents.length) continue;
+          const g = el("button", null, "hist-gap");
+          g.type = "button";
+          g.dataset.gap = String(vi);
+          g.title = (expandedGaps.has(vi) ? "Hide" : "Show") + " member changes between v" + versions[vi].version + " and v" + versions[vi + 1].version;
+          const gt = el("div", null, "hist-top");
+          const gm = el("div", null, "hist-mid");
+          const plus = el("div", expandedGaps.has(vi) ? "−" : "+", "hist-plus");
+          gm.appendChild(plus);
+          const gd = el("div", null, "hist-date");
+          g.appendChild(gt);
+          g.appendChild(gm);
+          g.appendChild(gd);
+          g.addEventListener("click", () => {
+            const willExpand = !expandedGaps.has(vi);
+            if (willExpand) expandedGaps.add(vi); else expandedGaps.delete(vi);
+            renderList();
+            renderDetail();
+            if (willExpand) scrollToGap(vi);
+          });
+          track.appendChild(g);
+          if (expandedGaps.has(vi)) for (const ev of gapEvents) track.appendChild(memberNode(ev, vi));
+        }
+      }
+      scroller.appendChild(track);
+      listWrap.appendChild(scroller);
+      lastScroller = scroller;
+      lastTrack = track;
+      if (!scrolledToEnd) {
+        scrolledToEnd = true;
+        scroller.scrollLeft = scroller.scrollWidth;
+        const selBtn = track.querySelector('[data-nid="' + selectedId + '"]');
+        if (selBtn) selBtn.focus({ preventScroll: true });
+      }
     }
     function emptyObjFor(v) { return { type: v.type, id: v.id, members: [], nodeRefs: [], lat: null, lon: null }; }
     // The detail card and its map are built once: switching versions only
@@ -2135,34 +2437,24 @@ if (typeof document !== "undefined") {
     let card = null, headEl = null, prevBtn = null, nextBtn = null;
     let noteSlot = null, mapSlot = null, changesSlot = null, stateSlot = null;
     let mapView = null;
-    function selectVersion(i) {
-      const next = Math.max(0, Math.min(versions.length - 1, i));
-      if (next === selected) return;
-      selected = next;
-      renderList();
-      renderDetail();
-    }
     // Keyboard switching for this history view (see the document keydown
-    // listener in init). Directions follow the version strip, which runs
-    // newest-first left to right: ArrowLeft / "-" = newer version (left
-    // in the strip), ArrowRight / "=" / "+" = older version (right in
-    // the strip).
-    historyNav = { newer: () => selectVersion(selected + 1), older: () => selectVersion(selected - 1) };
+    // listener in init). Directions follow the timeline, which runs
+    // oldest first left to right: ArrowLeft / "-" = older entry,
+    // ArrowRight / "=" / "+" = newer entry.
+    historyNav = { prev: () => selectEntry(entryIndex(selectedId) - 1), next: () => selectEntry(entryIndex(selectedId) + 1) };
     function renderDetail() {
-      const cur = versions[selected];
-      const prev = selected > 0 ? versions[selected - 1] : null;
+      const selEntry = entries.find((e) => e.id === selectedId) || entries[entries.length - 1];
+      if (!selEntry) return;
       if (!card) {
         card = el("div", null, "obj");
         headEl = el("h3", null);
         const nav = el("div", null, "row");
         prevBtn = el("button", "Previous version", "secondary"); prevBtn.type = "button";
         nextBtn = el("button", "Next version", "secondary"); nextBtn.type = "button";
-        prevBtn.addEventListener("click", () => selectVersion(selected - 1));
-        nextBtn.addEventListener("click", () => selectVersion(selected + 1));
-        // Button order follows the version strip (newest first, left to
-        // right), like the arrow keys: newer on the left, older on the right.
-        nav.appendChild(nextBtn);
+        prevBtn.addEventListener("click", () => selectEntry(entryIndex(selectedId) - 1));
+        nextBtn.addEventListener("click", () => selectEntry(entryIndex(selectedId) + 1));
         nav.appendChild(prevBtn);
+        nav.appendChild(nextBtn);
         noteSlot = document.createElement("div");
         mapSlot = document.createElement("div");
         changesSlot = document.createElement("div");
@@ -2175,11 +2467,52 @@ if (typeof document !== "undefined") {
         card.appendChild(stateSlot);
         detailWrap.appendChild(card);
       }
+      const idx = entryIndex(selectedId);
+      prevBtn.disabled = idx <= 0;
+      nextBtn.disabled = idx >= entries.length - 1;
+      if (selEntry.kind === "member") {
+        // A member geometry change between two relation versions: the
+        // relation membership is the older version's, the map compares
+        // its geometry as of that version against the change's
+        // changeset, with the changed way drawn as a segment diff.
+        const ev = selEntry.ev;
+        const gap = selEntry.gap;
+        const base = versions[gap];
+        headEl.innerHTML = "";
+        headEl.appendChild(document.createTextNode("way " + ev.way + " — " + ev.detail + " | " + fmtDate(ev.timestamp) + " | changeset "));
+        headEl.appendChild(changesetLink(ev.changeset));
+        noteSlot.innerHTML = "";
+        const histBounds = (base.changeset != null && ev.changeset != null)
+          ? { old: { changeset: base.changeset, inclusive: true }, new: { changeset: ev.changeset, inclusive: true } }
+          : null;
+        if (!mapView) {
+          mapView = buildMapView(base, base, histBounds);
+          mapView.hidden = false;
+          mapSlot.appendChild(mapView);
+          mapView.load();
+        } else {
+          mapView.reload(base, base, histBounds, { highlightWay: ev.way });
+        }
+        const ch = document.createElement("div");
+        const ul = el("ul", null, "diff");
+        ul.appendChild(el("li", "way " + ev.way + ": " + ev.detail));
+        ch.appendChild(ul);
+        const p = el("p", null, "muted");
+        p.appendChild(document.createTextNode("Changeset "));
+        p.appendChild(changesetLink(ev.changeset));
+        p.appendChild(document.createTextNode(" · " + fmtDate(ev.timestamp) + " · between v" + versions[gap].version + " and v" + versions[gap + 1].version + " · the relation version did not change."));
+        ch.appendChild(p);
+        changesSlot.innerHTML = "";
+        changesSlot.appendChild(section("Member change:", [ch]));
+        stateSlot.innerHTML = "";
+        return;
+      }
+      const vi = selEntry.vi;
+      const cur = versions[vi];
+      const prev = vi > 0 ? versions[vi - 1] : null;
       headEl.innerHTML = "";
       headEl.appendChild(document.createTextNode("Version " + cur.version + " | " + fmtDate(cur.timestamp) + " | " + (cur.user || "?") + " | changeset "));
       headEl.appendChild(changesetLink(cur.changeset));
-      prevBtn.disabled = selected <= 0;
-      nextBtn.disabled = selected >= versions.length - 1;
       noteSlot.innerHTML = "";
       if (!cur.visible) noteSlot.appendChild(el("p", "This version deleted the object.", "del"));
       // Map directly under the prev/next navigation, with the change
@@ -2218,6 +2551,13 @@ if (typeof document !== "undefined") {
         ch.appendChild(ul);
         const gp = geometryPreview(prev, cur);
         if (gp) ch.appendChild(gp);
+        const md = versionMemberDetails.get(vi) || [];
+        if (md.length) {
+          ch.appendChild(el("p", "Member geometry changed in this same changeset:", "muted"));
+          const mul = el("ul", null, "diff");
+          for (const d of md) mul.appendChild(el("li", "way " + d.way + ": " + d.detail));
+          ch.appendChild(mul);
+        }
       }
       changesSlot.innerHTML = "";
       changesSlot.appendChild(section("Changes in this version:", [ch]));
@@ -2245,6 +2585,22 @@ if (typeof document !== "undefined") {
     }
     renderList();
     renderDetail();
+    if (type === "relation") {
+      // Member geometry changes resolve in the background: the
+      // timeline and map already work without them. The toggle button
+      // stays disabled until the computation finishes (or fails).
+      computeRelationMemberChanges(versions).then((res) => {
+        memberGaps = res.gaps;
+        versionMemberDetails = res.versionDetails;
+        memberPartial = res.partial;
+        renderList();
+        const selVi = (entries.find((e) => e.id === selectedId) || {}).vi;
+        if (selVi != null && (versionMemberDetails.get(selVi) || []).length) renderDetail();
+      }).catch(() => {
+        memberFailed = true;
+        renderList();
+      });
+    }
   }
   async function loadChangesetView(id) {
     viewMode = "changeset";
@@ -2389,14 +2745,14 @@ if (typeof document !== "undefined") {
       }
     });
     document.addEventListener("keydown", (e) => {
-      // History view only, following the version strip (newest first, left
-      // to right): ArrowLeft / "-" = newer version, ArrowRight / "=" / "+"
-      // = older version. Never hijack keys while typing.
+      // History view only, following the timeline (oldest first, left
+      // to right): ArrowLeft / "-" = older entry, ArrowRight / "=" / "+"
+      // = newer entry. Never hijack keys while typing.
       if (viewMode !== "history" || !historyNav) return;
       const ae = document.activeElement;
       if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT" || ae.isContentEditable)) return;
-      if (e.key === "ArrowLeft" || e.key === "-") { e.preventDefault(); historyNav.newer(); }
-      else if (e.key === "ArrowRight" || e.key === "=" || e.key === "+") { e.preventDefault(); historyNav.older(); }
+      if (e.key === "ArrowLeft" || e.key === "-") { e.preventDefault(); historyNav.prev(); }
+      else if (e.key === "ArrowRight" || e.key === "=" || e.key === "+") { e.preventDefault(); historyNav.next(); }
     });
     const histParam = new URLSearchParams(location.search).get("history");
     if (histParam) {

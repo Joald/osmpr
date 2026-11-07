@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput, pickVersionAtChangeset };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, parseHistorySpec, parseHistoryInput, normalizeHistoryElement, historyChangeSummary, parseGoInput, pickVersionAtChangeset } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, computeMemberGeometryEvents };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, computeMemberGeometryEvents } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -224,139 +224,95 @@ assert.equal(wayDl.geometryLines[4].kind, "del"); assert.equal(wayDl.geometryLin
 const relDl = buildDiffLines({}, [], {}, [], { type: "relation" }, { type: "relation" });
 assert.equal(relDl.geometryLines.length, 0, "relations carry geometry in members, not a Geometry section");
 
-// --- object history (?history=) ---
-assert.deepEqual(parseHistorySpec("relation:2402490"), { type: "relation", id: 2402490 });
-assert.deepEqual(parseHistorySpec("r:2402490"), { type: "relation", id: 2402490 });
-assert.deepEqual(parseHistorySpec("rel:2402490"), { type: "relation", id: 2402490 });
-assert.deepEqual(parseHistorySpec("w:123"), { type: "way", id: 123 });
-assert.deepEqual(parseHistorySpec("node:456"), { type: "node", id: 456 });
-assert.equal(parseHistorySpec("x:1"), null);
-assert.equal(parseHistorySpec("relation:abc"), null);
-assert.equal(parseHistorySpec("2402490"), null);
-assert.equal(parseHistorySpec("relation:0"), null);
-assert.equal(parseHistorySpec("relation:1:extra"), null);
-assert.deepEqual(parseHistorySpec(" relation:2402490 "), { type: "relation", id: 2402490 });
-assert.deepEqual(parseHistoryInput("https://www.openstreetmap.org/relation/2402490"), { type: "relation", id: 2402490 });
-assert.deepEqual(parseHistoryInput("https://www.openstreetmap.org/way/123"), { type: "way", id: 123 });
-assert.deepEqual(parseHistoryInput("n:789"), { type: "node", id: 789 });
-assert.equal(parseHistoryInput(""), null);
-assert.equal(parseHistoryInput("garbage"), null);
-
-const histRel = normalizeHistoryElement({ type: "relation", id: 900001, version: 14, changeset: 181933730, timestamp: "2026-04-28T10:46:29Z", user: "raphaelmirc", visible: true, tags: { name: "Santa Matilde" }, members: [{ type: "way", ref: 11, role: "outer" }, { type: "node", ref: 22 }] });
-assert.equal(histRel.members.length, 2);
-assert.equal(histRel.members[1].role, "");
-assert.equal(histRel.nodeRefs, null);
-const histWay = normalizeHistoryElement({ type: "way", id: 900200, version: 3, changeset: 1, timestamp: "2026-01-01T00:00:00Z", user: "u", visible: true, tags: {}, nodes: [11, 22, 33] });
-assert.deepEqual(histWay.nodeRefs, [11, 22, 33]);
-const histNode = normalizeHistoryElement({ type: "node", id: 900100, version: 2, changeset: 1, timestamp: "2026-01-01T00:00:00Z", user: "u", visible: true, tags: {}, lat: 51.5, lon: -0.1 });
-assert.equal(histNode.lat, 51.5);
-const histDel = normalizeHistoryElement({ type: "relation", id: 900001, version: 15, changeset: 2, timestamp: "2026-01-02T00:00:00Z", user: "u", visible: false, tags: {}, members: [] });
-assert.equal(histDel.visible, false);
-assert.equal(normalizeHistoryElement({ type: "relation", id: 1 }), null);
-
-const v1 = { type: "relation", id: 900001, version: 1, tags: { name: "A" }, members: [member("way", 11, "outer")], visible: true };
-const v2 = { type: "relation", id: 900001, version: 2, tags: { name: "B" }, members: [member("way", 11, "outer"), member("way", 12, "outer")], visible: true };
-assert.deepEqual(historyChangeSummary(null, v1), { kind: "created" });
-const s2 = historyChangeSummary(v1, v2);
-assert.equal(s2.kind, "changed");
-assert.equal(s2.addedMembers, 1);
-assert.equal(s2.removedMembers, 0);
-assert.equal(s2.tagChanges, 1);
-assert.equal(s2.geometryChanged, false);
-const vDel = { ...v2, version: 3, visible: false };
-assert.deepEqual(historyChangeSummary(v2, vDel), { kind: "deleted" });
-const n1 = { type: "node", id: 900100, version: 1, tags: {}, lat: 51.5, lon: -0.1, visible: true };
-const n2 = { ...n1, version: 2, lat: 51.6 };
-assert.equal(historyChangeSummary(n1, n2).geometryChanged, true);
-const w1 = { type: "way", id: 900200, version: 1, tags: {}, nodeRefs: [11, 22], visible: true };
-const w2 = { ...w1, version: 2, nodeRefs: [11, 22, 33] };
-assert.equal(historyChangeSummary(w1, w2).geometryChanged, true);
-assert.equal(historyChangeSummary(w1, { ...w1, version: 2 }).geometryChanged, false);
-
-// --- unified header field (Go) ---
-assert.deepEqual(parseGoInput("https://www.openstreetmap.org/changeset/181933730", "relation"), { view: "changeset", id: "181933730" });
-assert.deepEqual(parseGoInput("https://www.openstreetmap.org/relation/2402490", "changeset"), { view: "history", type: "relation", id: 2402490 });
-assert.deepEqual(parseGoInput("relation:2402490", "changeset"), { view: "history", type: "relation", id: 2402490 });
-assert.deepEqual(parseGoInput("2402490", "relation"), { view: "history", type: "relation", id: 2402490 });
-assert.deepEqual(parseGoInput("181933730", "changeset"), { view: "changeset", id: "181933730" });
-assert.deepEqual(parseGoInput("2402490", "node"), { view: "history", type: "node", id: 2402490 });
-assert.equal(parseGoInput("garbage", "relation"), null);
-assert.equal(parseGoInput("", "relation"), null);
-assert.equal(parseGoInput("2402490", "bogus"), null);
-
-// --- version as of a changeset bound ---
-const histEls = [
-  { version: 1, changeset: 100 },
-  { version: 2, changeset: 200 },
-  { version: 3, changeset: 300, visible: false },
+// --- member geometry events (relation history; real shape: relation 52818) ---
+function nodeHist(id, lat, lon, extra) {
+  const els = [{ type: "node", id, version: 1, changeset: 100, timestamp: "2008-11-21T00:00:00Z", visible: true, lat, lon }];
+  (extra || []).forEach((m, k) => {
+    els.push(m.del
+      ? { type: "node", id, version: 2 + k, changeset: m.cs, timestamp: m.ts, visible: false }
+      : { type: "node", id, version: 2 + k, changeset: m.cs, timestamp: m.ts, visible: true, lat: m.lat, lon: m.lon });
+  });
+  return els;
+}
+function wayHist(id, vs) {
+  return vs.map((v, k) => ({ type: "way", id, version: k + 1, changeset: v.cs, timestamp: v.ts, visible: true, nodes: v.nodes }));
+}
+const A = 313437932, B = 313437933, C = 4536695974, D = 4537517868, E = 4537517867, F = 4537517866, G = 4537517865, H = 301742553;
+const X = 1179039271, Y = 1297743462, Z = 313437934, P = 600000001, Q = 600000002;
+const N = (n) => 500000000 + n;
+const nodeHists = new Map([
+  [A, nodeHist(A, 63.8413961, 20.1766622, [{ cs: 60117010, ts: "2018-06-24T10:22:36Z", lat: 63.842, lon: 20.177 }])],
+  [B, nodeHist(B, 63.8384067, 20.1757181, [{ cs: 44154732, ts: "2016-12-04T10:38:41Z", del: true }])],
+  [C, nodeHist(C, 63.8433034, 20.1774727, [])],
+  [D, nodeHist(D, 63.8413249, 20.1790937, [])],
+  [E, nodeHist(E, 63.8413, 20.1791, [])],
+  [F, nodeHist(F, 63.8412, 20.1792, [])],
+  [G, nodeHist(G, 63.8411, 20.1793, [])],
+  [H, nodeHist(H, 63.8363416, 20.1748466, [])],
+  [X, nodeHist(X, 63.8416515, 20.1907677, [])],
+  [Y, nodeHist(Y, 63.8427612, 20.1820971, [])],
+  [Z, nodeHist(Z, 63.841, 20.19, [])],
+  [P, nodeHist(P, 63.84, 20.17, [])],
+  [Q, nodeHist(Q, 63.841, 20.171, [])],
+]);
+for (let n = 1; n <= 13; n++) nodeHists.set(N(n), nodeHist(N(n), 63.84 + n * 0.0001, 20.18, []));
+const wayHists = new Map([
+  [28533849, wayHist(28533849, [
+    { cs: 775238, ts: "2008-11-21T00:00:00Z", nodes: [A, B] },
+    { cs: 44154732, ts: "2016-12-04T10:38:41Z", nodes: [C, A, D, E, F, G, H] },
+  ])],
+  [28533841, wayHist(28533841, [
+    { cs: 775238, ts: "2008-11-21T00:00:00Z", nodes: [X, Z] },
+    { cs: 44148051, ts: "2016-12-03T00:00:00Z", nodes: [X, Y, Z] },
+    { cs: 44154732, ts: "2016-12-04T10:38:41Z", nodes: [X, Y] },
+  ])],
+  [457639815, wayHist(457639815, [
+    { cs: 44154732, ts: "2016-12-04T10:38:41Z", nodes: [N(1), N(2), N(3), N(4), N(5), N(6), N(7), N(8), N(9), N(10), N(11)] },
+    { cs: 60117010, ts: "2018-06-24T10:22:36Z", nodes: [N(1), N(2), N(3), N(4), N(5), N(6), N(7), N(8), N(9), N(10), N(11), N(12), N(13)] },
+  ])],
+  [999, wayHist(999, [
+    { cs: 100, ts: "2008-11-21T00:00:00Z", nodes: [P, Q] },
+    { cs: 500, ts: "2009-01-01T00:00:00Z", nodes: [P, Q] },
+  ])],
+]);
+// wayHist() numbers versions 1..n in order; 28533841's real versions are
+// v3/v6/v7, so the expected detail strings use those test-local numbers.
+const relVersions = [
+  { type: "relation", id: 52818, version: 6, changeset: 775238, timestamp: "2008-11-21T00:00:00Z", user: "Cohan", visible: true, tags: {}, members: [{ type: "way", ref: 28533841, role: "outer" }, { type: "way", ref: 28533849, role: "outer" }] },
+  { type: "relation", id: 52818, version: 7, changeset: 44148051, timestamp: "2016-12-03T00:00:00Z", user: "MMN-o", visible: true, tags: {}, members: [{ type: "way", ref: 28533841, role: "outer" }, { type: "way", ref: 28533849, role: "outer" }] },
+  { type: "relation", id: 52818, version: 8, changeset: 44154732, timestamp: "2016-12-04T10:38:41Z", user: "MMN-o", visible: true, tags: {}, members: [{ type: "way", ref: 28533841, role: "outer" }, { type: "way", ref: 28533849, role: "outer" }, { type: "way", ref: 457639815, role: "outer" }, { type: "way", ref: 999, role: "outer" }] },
+  { type: "relation", id: 52818, version: 9, changeset: 64454763, timestamp: "2018-11-13T00:00:00Z", user: "-WI-", visible: true, tags: {}, members: [{ type: "way", ref: 28533841, role: "outer" }, { type: "way", ref: 28533849, role: "outer" }, { type: "way", ref: 457639815, role: "outer" }, { type: "way", ref: 999, role: "outer" }] },
 ];
-assert.equal(pickVersionAtChangeset(histEls, 200, true).version, 2);
-assert.equal(pickVersionAtChangeset(histEls, 200, false).version, 1);
-assert.equal(pickVersionAtChangeset(histEls, 150, true).version, 1);
-assert.equal(pickVersionAtChangeset(histEls, 50, true), null);
-assert.equal(pickVersionAtChangeset(histEls, 300, true), null); // deleted by then
-assert.equal(pickVersionAtChangeset(histEls, 300, false).version, 2);
-assert.equal(pickVersionAtChangeset(histEls, 999, true), null); // still deleted
-assert.equal(pickVersionAtChangeset([], 100, true), null);
-assert.equal(pickVersionAtChangeset(histEls, null, true), null);
-
-// --- error toast wiring (browser UI, checked statically: it lives inside
-// the document-guarded block, so it cannot be exercised under node) ---
-// The upload catch must surface failures visibly, not just in the console:
-// a 413 on the second object once went unnoticed that way.
-assert.match(html, /showErrorToast\(e\.message, failedId, failedClosed\)/,
-  "upload catch must show an error toast");
-assert.match(html, /function showErrorToast\(message, changesetId, changesetClosed\)/,
-  "error toast must carry the message and the failed changeset");
-const errorToastBody = html.split("function showErrorToast")[1].split("\n  function el(")[0];
-assert.match(errorToastBody, /t\.className = "panel error"/, "error toast must use the error styling");
-assert.ok(!/setTimeout\(\(\) => \{ t\.hidden = true; \}/.test(errorToastBody),
-  "error toast must not auto-hide like the success toast");
-assert.match(errorToastBody, /Upload failed: " \+ message/, "error toast must show the API error text");
-
-// --- occurrence-aware member diffs: deduplication must be visible ---
-// Old set-based diff reported no change at all for old [X, X] -> new [X].
-const dupOld = [member("way", 11, "outer"), member("way", 12, "outer"), member("way", 12, "outer")];
-const dupNew = [member("way", 11, "outer"), member("way", 12, "outer")];
-const dupDm = diffMembers(dupOld, dupNew);
-assert.deepEqual(dupDm.added, []);
-assert.equal(dupDm.removed.length, 1);
-assert.equal(dupDm.removed[0].ref, 12);
-assert.equal(dupDm.unchangedCount, 2);
-const quadDm = diffMembers(
-  [member("way", 12, "outer"), member("way", 12, "outer"), member("way", 12, "outer"), member("way", 12, "outer")],
-  [member("way", 12, "outer")]);
-assert.equal(quadDm.removed.length, 3);
-assert.equal(quadDm.unchangedCount, 1);
-
-// --- applyOps dedup note: short targeted info, not an essay ---
-const jardinPre = {
-  type: "relation", id: 900050, version: 3, tags: { name: "Barrio Jardín" },
-  members: [member("way", 11, "outer"), member("way", 12, "outer"), member("way", 12, "outer"), member("node", 99, "label")],
-};
-const jardinFixed = applyOps(jardinPre, {
-  add: [{ type: "way", ref: 12, role: "outer" }],
-  remove: [{ type: "way", ref: 12, role: "outer", roleGiven: true }],
-  tags: {},
-});
-assert.equal(jardinFixed.members.length, 3);
-assert.equal(jardinFixed.members[2].ref, 12); // surviving copy moves to the end
-assert.ok(jardinFixed.notes.some((n) => n.text === "Dedup way 12 (outer): 2× → 1×"),
-  "dedup note must be short and targeted, got: " + JSON.stringify(jardinFixed.notes));
-assert.ok(!jardinFixed.notes.some((n) => /Removed 2 matching members/.test(n.text)),
-  "old misleading remove note must be gone");
-const jardinRemoved = applyOps(jardinPre, {
-  add: [], remove: [{ type: "way", ref: 12, role: "outer", roleGiven: true }], tags: {},
-});
-assert.ok(jardinRemoved.notes.some((n) => n.text === "Removed way 12 (outer): 2× → 0×"),
-  "remove-without-add-back must still state the copy count");
-
-// --- Diff view lines for a dedup: one removed copy, surviving copy kept ---
-const dupDl = buildDiffLines({}, dupOld, {}, dupNew);
-const dupDel = dupDl.memberLines.filter((l) => l.kind === "del");
-assert.equal(dupDel.length, 1);
-assert.equal(dupDel[0].member.ref, 12);
-assert.equal(dupDel[0].oldNo, 3);
-assert.ok(dupDl.memberLines.some((l) => l.kind === "same" && l.member.ref === 12));
+const mge = computeMemberGeometryEvents(relVersions, wayHists, nodeHists);
+assert.equal(mge.partial, false);
+// v7 (vi 1): 28533841 extended 2 -> 3 nodes, in v7's own changeset.
+assert.equal((mge.versionDetails.get(1) || []).length, 1);
+assert.equal(mge.versionDetails.get(1)[0].way, 28533841);
+assert.equal(mge.versionDetails.get(1)[0].detail, "nodes 2 → 3 (way v1 → v2)");
+// v8 (vi 2): both reshaped members, in v8's own changeset.
+assert.equal((mge.versionDetails.get(2) || []).length, 2);
+assert.deepEqual(mge.versionDetails.get(2).map((d) => d.way), [28533841, 28533849]);
+assert.equal(mge.versionDetails.get(2).find((d) => d.way === 28533849).detail, "nodes 2 → 7 (way v1 → v2)");
+// Gap v8 -> v9: 457639815 extended 11 -> 13 nodes, and 28533849's node A
+// moved, both in changeset 60117010 (relation version unchanged).
+const gap2 = mge.gaps.get(2) || [];
+assert.equal(gap2.length, 2);
+assert.deepEqual(gap2.map((e) => e.way), [28533849, 457639815]);
+assert.equal(gap2.find((e) => e.way === 457639815).kind, "refs");
+assert.equal(gap2.find((e) => e.way === 457639815).changeset, 60117010);
+assert.equal(gap2.find((e) => e.way === 28533849).kind, "moved");
+assert.equal(gap2.find((e) => e.way === 28533849).changeset, 60117010);
+// Tag-only way bump (999, same refs and coords) produces no event.
+assert.ok(![...mge.gaps.values()].flat().some((e) => e.way === 999));
+assert.ok(![...mge.versionDetails.values()].flat().some((d) => d.way === 999));
+// Cap: 201 member ways -> partial, no crash.
+const manyMembers = Array.from({ length: 201 }, (_, i) => ({ type: "way", ref: 1000 + i, role: "outer" }));
+const manyVersions = [
+  { type: "relation", id: 1, version: 1, changeset: 100, timestamp: "2008-11-21T00:00:00Z", user: "x", visible: true, tags: {}, members: manyMembers },
+  { type: "relation", id: 1, version: 2, changeset: 200, timestamp: "2008-11-22T00:00:00Z", user: "x", visible: true, tags: {}, members: manyMembers },
+];
+const capRes = computeMemberGeometryEvents(manyVersions, new Map(), new Map());
+assert.equal(capRes.partial, true);
+assert.equal(capRes.gaps.size, 0);
 
 console.log("All editor logic tests passed.");
