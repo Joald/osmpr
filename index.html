@@ -2288,6 +2288,19 @@ if (typeof document !== "undefined") {
     const detailWrap = document.createElement("div");
     preview.appendChild(listWrap);
     preview.appendChild(detailWrap);
+    // The scroll container and track are created once and never
+    // replaced: rebuilding them (e.g. when the background member
+    // computation finishes) reset scrollLeft to 0 and the timeline
+    // jumped back to the left end. renderList only swaps their
+    // contents, so the scroll position survives rebuilds.
+    const toggleRowWrap = document.createElement("div");
+    const scroller = el("div", null, "tl-scroll");
+    const track = el("div", null, "hist-track");
+    scroller.appendChild(track);
+    listWrap.appendChild(toggleRowWrap);
+    listWrap.appendChild(scroller);
+    lastScroller = scroller;
+    lastTrack = track;
     function fmtDate(ts) { return (ts || "").slice(0, 10); }
     function fmtTs(ts) { return (ts || "").replace("T", " ").replace("Z", " UTC"); }
     function changesetLink(cs) {
@@ -2372,7 +2385,7 @@ if (typeof document !== "undefined") {
         selectedId = selectedGap ? "v" + selectedGap[0] : "v" + (versions.length - 1);
         selectedGap = null;
       }
-      listWrap.innerHTML = "";
+      toggleRowWrap.innerHTML = "";
       if (type === "relation") {
         const row = el("div", null, "row");
         const toggleBtn = el("button", expandedGaps.size > 0 ? "Hide all member changes" : "Show all member changes", "secondary");
@@ -2387,10 +2400,9 @@ if (typeof document !== "undefined") {
           renderDetail();
         });
         row.appendChild(toggleBtn);
-        listWrap.appendChild(row);
+        toggleRowWrap.appendChild(row);
       }
-      const scroller = el("div", null, "tl-scroll");
-      const track = el("div", null, "hist-track");
+      track.innerHTML = "";
       for (let vi = 0; vi < versions.length; vi++) {
         track.appendChild(versionNode(versions[vi], vi));
         if (vi < versions.length - 1) {
@@ -2419,19 +2431,15 @@ if (typeof document !== "undefined") {
           if (expandedGaps.has(vi)) for (const ev of gapEvents) track.appendChild(memberNode(ev, vi));
         }
       }
-      scroller.appendChild(track);
-      listWrap.appendChild(scroller);
-      lastScroller = scroller;
-      lastTrack = track;
       if (!scrolledToEnd) {
         scrolledToEnd = true;
         scroller.scrollLeft = scroller.scrollWidth;
         const selBtn = track.querySelector('[data-nid="' + selectedId + '"]');
         if (selBtn) selBtn.focus({ preventScroll: true });
       } else {
-        // Rebuilds (e.g. when the background member computation
-        // finishes) replace the scroll container, resetting scrollLeft
-        // to 0. Keep the selected entry in view instead.
+        // Rebuilds can shift content left of the selection (expanding
+        // a gap, or [+] toggles appearing after the computation): keep
+        // the selected entry in view with a minimal scroll.
         const selBtn = track.querySelector('[data-nid="' + selectedId + '"]');
         if (selBtn) {
           const left = selBtn.offsetLeft, right = left + selBtn.offsetWidth;
