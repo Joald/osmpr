@@ -305,6 +305,8 @@ assert.equal(gap2.find((e) => e.way === 28533849).changeset, 60117010);
 // Tag-only way bump (999, same refs and coords) produces no event.
 assert.ok(![...mge.gaps.values()].flat().some((e) => e.way === 999));
 assert.ok(![...mge.versionDetails.values()].flat().some((d) => d.way === 999));
+// Nothing changed after the newest version (v9 @64454763): no trailing gap.
+assert.equal(mge.gaps.get(3), undefined);
 // No caps: 201 member ways (past the old 200-way cap) are all covered.
 const manyMembers = Array.from({ length: 201 }, (_, i) => ({ type: "way", ref: 1000 + i, role: "outer" }));
 const many201WayHists = new Map();
@@ -517,14 +519,53 @@ assert.deepEqual(exGap.filter((e) => e.obj === 7102).map((e) => [e.changeset, e.
 // Way 7103: refs change and node move in the same changeset -> one event.
 assert.deepEqual(exGap.filter((e) => e.obj === 7103).map((e) => [e.changeset, e.kind]), [[200, "refs"]]);
 // Node member EN2: moved twice in the gap -> two events; the move after
-// the last relation version (cs 350) has no gap and is not shown.
+// the last relation version (cs 350) lands in the trailing gap.
 assert.deepEqual(exGap.filter((e) => e.obj === EN2).map((e) => [e.changeset, e.kind]), [[150, "moved"], [250, "moved"]]);
 assert.deepEqual(exGap.find((e) => e.obj === EN2 && e.changeset === 150).oldPos, { lat: 63.84, lon: 20.18 });
 assert.deepEqual(exGap.find((e) => e.obj === EN2 && e.changeset === 150).newPos, { lat: 63.841, lon: 20.181 });
-// Way 7104 changed only before the first / after the last relation
-// version -> no event at all.
+// Way 7104 changed only before the first relation version (cs 50) -> no
+// event in gap 0; its change after the last version (cs 400) lands in
+// the trailing gap, together with EN2's cs-350 move.
 assert.ok(!exGap.some((e) => e.obj === 7104));
+const exTrail = ex.gaps.get(1) || [];
+assert.deepEqual(exTrail.map((e) => [e.obj, e.changeset, e.kind]), [[EN2, 350, "moved"], [7104, 400, "refs"]]);
+assert.deepEqual(exTrail.find((e) => e.obj === EN2).oldPos, { lat: 63.842, lon: 20.182 });
+assert.deepEqual(exTrail.find((e) => e.obj === EN2).newPos, { lat: 63.843, lon: 20.183 });
+assert.equal(exTrail.find((e) => e.obj === 7104).detail, "nodes 2 → 3 (way v1 → v2)");
 assert.equal(ex.versionDetails.size, 0);
+
+// --- trailing gap: member changes after the newest version ---
+// Single-version relation: its only gap IS the trailing one. The way's
+// tag-only bump (v2, same refs) produces no event; the refs change and
+// the node move at cs 500, both after the relation's only version,
+// land in gap 0.
+const TR1 = 700000201, TR2 = 700000202, TR3 = 700000203, TR4 = 700000204;
+const trailNodeHists = new Map([
+  [TR1, nodeHist(TR1, 63.84, 20.18, [])],
+  [TR2, nodeHist(TR2, 63.841, 20.181, [])],
+  [TR3, nodeHist(TR3, 63.842, 20.182, [])],
+  [TR4, nodeHist(TR4, 63.843, 20.183, [{ cs: 500, ts: "2016-05-01T00:00:00Z", lat: 63.844, lon: 20.184 }])],
+]);
+const trailWayHists = new Map([
+  [7201, wayHist(7201, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [TR1, TR2] },
+    { cs: 200, ts: "2016-02-01T00:00:00Z", nodes: [TR1, TR2] },
+    { cs: 500, ts: "2016-05-01T00:00:00Z", nodes: [TR1, TR2, TR3] },
+  ])],
+]);
+const trailVersions = [
+  { type: "relation", id: 910000, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 7201, role: "outer" }, { type: "node", ref: TR4, role: "label" }] },
+];
+const tg = computeMemberGeometryEvents(trailVersions, trailWayHists, trailNodeHists);
+assert.equal(tg.partial, false);
+assert.equal(tg.versionDetails.size, 0);
+const tgTrail = tg.gaps.get(0) || [];
+assert.equal(tgTrail.length, 2);
+assert.deepEqual(tgTrail.map((e) => [e.obj, e.changeset, e.kind]), [[TR4, 500, "moved"], [7201, 500, "refs"]]);
+assert.deepEqual(tgTrail.find((e) => e.obj === TR4).oldPos, { lat: 63.843, lon: 20.183 });
+assert.deepEqual(tgTrail.find((e) => e.obj === TR4).newPos, { lat: 63.844, lon: 20.184 });
+assert.equal(tgTrail.find((e) => e.obj === 7201).detail, "nodes 2 → 3 (way v2 → v3)");
+assert.equal(tg.gaps.get(1), undefined);
 
 // --- way segment diff: a moved node reads as removed + added ---
 const SA = 1, SB = 2, SC = 3;
