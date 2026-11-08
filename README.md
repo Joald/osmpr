@@ -146,7 +146,10 @@ present, `d` wins.
   way is drawn segment by segment (consecutive node pairs
   matched as a multiset): unchanged segments grey, removed
   segments red, added segments green — never the whole new way
-  in green on top of the whole old way in red.
+  in green on top of the whole old way in red. Lines that coincide
+  exactly (a way both added and removed, the same member way drawn
+  by two relations) are offset sideways by a few metres, so each
+  stays visible and clickable instead of hiding under the top one.
 - Diff views show 3 lines of context around each change; the
   rest of an unchanged run collapses behind one expander, and
   expanding it reveals the lines and removes the expander button.

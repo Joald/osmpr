@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, offsetPolylinePts, separateOverlappingDrawables };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, offsetPolylinePts, separateOverlappingDrawables } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -575,5 +575,55 @@ assert.deepEqual(ovOld.get(12), { lat: 1, lon: 1 });
 assert.deepEqual(ovNew.get(13), { lat: 2, lon: 2 }, "untouched node keeps live coords on both sides");
 assert.deepEqual(ovNew.get(-5), { lat: 4, lon: 4 });
 assert.ok(!ovOld.has(-5), "placeholder node has no old position");
+
+// --- overlapping-line separation: offset + grouping ---
+// Straight eastward line at the equator: positive offset is left of
+// travel, i.e. north; 111320 m is one degree of latitude.
+const offLine = [{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 0, lon: 2 }];
+const offNorth = offsetPolylinePts(offLine, 111320);
+assert.deepEqual(offNorth.map((p) => [p.lat, p.lon]), [[1, 0], [1, 1], [1, 2]]);
+const offSouth = offsetPolylinePts(offLine, -111320);
+assert.deepEqual(offSouth.map((p) => [p.lat, p.lon]), [[-1, 0], [-1, 1], [-1, 2]]);
+assert.equal(offsetPolylinePts(offLine, 0), offLine, "zero offset returns the input");
+// L-shaped line: the corner averages the eastward (north) and
+// northward (west) normals, so a 111320*sqrt(2) m offset moves it
+// exactly (+1 lat, -1 lon); endpoints follow their single segment
+// (start: +sqrt(2) lat, end: -sqrt(2)/cos(1 deg) lon).
+const offL = offsetPolylinePts([{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 1, lon: 1 }], 111320 * Math.SQRT2);
+assert.ok(Math.abs(offL[0].lat - Math.SQRT2) < 1e-9 && Math.abs(offL[0].lon) < 1e-9);
+assert.ok(Math.abs(offL[1].lat - 1) < 1e-9 && Math.abs(offL[1].lon) < 1e-9);
+assert.ok(Math.abs(offL[2].lat - 1) < 1e-9);
+assert.ok(Math.abs(offL[2].lon - (1 - Math.SQRT2 / Math.cos(Math.PI / 180))) < 1e-9);
+// Closed ring stays closed and shrinks (counter-clockwise ring, left
+// is inward): first == last, and the corners move inward.
+const offRing = offsetPolylinePts([{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 1, lon: 1 }, { lat: 1, lon: 0 }, { lat: 0, lon: 0 }], 111320);
+assert.equal(offRing.length, 5);
+assert.deepEqual(offRing[4], offRing[0]);
+assert.ok(offRing[0].lat > 0 && offRing[0].lon > 0);
+assert.ok(offRing[2].lat < 1 && offRing[2].lon < 1);
+// Grouping: two identical lines (either direction) offset opposite
+// ways, 8 m step -> -4 m / +4 m; three identical lines leave the
+// middle one exactly on the feature; no duplicates returns the input.
+const dupA = { kind: "added", pts: offLine };
+const dupB = { kind: "removed", pts: offLine.slice().reverse() };
+const sep2 = separateOverlappingDrawables([dupA, dupB]);
+assert.ok(Math.abs(sep2[0].pts[0].lat - (-4 / 111320)) < 1e-9);
+assert.ok(Math.abs(sep2[1].pts[0].lat - (4 / 111320)) < 1e-9);
+assert.equal(sep2[0].kind, "added");
+assert.equal(sep2[1].kind, "removed");
+const dupC = { kind: "unchanged", pts: offLine };
+const sep3 = separateOverlappingDrawables([dupA, dupB, dupC]);
+assert.equal(sep3[1], dupB, "middle line of an odd group stays put");
+assert.ok(sep3[0].pts[0].lat < 0 && sep3[2].pts[0].lat > 0);
+const single = [{ kind: "added", pts: offLine }];
+assert.equal(separateOverlappingDrawables(single), single);
+// Connectors and single points never join a group, and a drawable
+// with a missing coordinate is skipped instead of crashing.
+const conn = { kind: "connector", pts: offLine };
+const connIn = [dupA, conn];
+assert.equal(separateOverlappingDrawables(connIn), connIn, "a line plus a connector over it is not a duplicate group");
+const badPts = { kind: "added", pts: [{ lat: 0, lon: 0 }, { lat: undefined, lon: 1 }] };
+const badIn = [badPts, { ...badPts }];
+assert.equal(separateOverlappingDrawables(badIn), badIn, "missing coordinates skip grouping, no crash");
 
 console.log("All editor logic tests passed.");

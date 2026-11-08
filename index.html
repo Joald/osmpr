@@ -872,6 +872,93 @@ function applyLiveNodeOverrides(pairs, coordsOld, coordsNew, prefillGeom) {
   }
 }
 
+// Offset a polyline sideways by meters (positive = left of the travel
+// direction): each point moves along the average normal of its
+// adjacent segments, so the offset line stays parallel to the
+// original instead of shifting along it. Closed rings (first point
+// == last point) stay closed: the closing point gets the first
+// point's offset.
+function offsetPolylinePts(pts, meters) {
+  if (!pts || pts.length < 2 || !meters) return pts;
+  for (const p of pts) if (!hasCoords(p)) return pts;
+  const R = 111320; // metres per degree of latitude, approx.
+  const closed = pts.length > 2 && pts[0].lat === pts[pts.length - 1].lat && pts[0].lon === pts[pts.length - 1].lon;
+  const n = closed ? pts.length - 1 : pts.length;
+  // Unit left normal of a segment, in metres space (x = east, y = north).
+  const segNormal = (a, b) => {
+    const latMid = (a.lat + b.lat) / 2 * Math.PI / 180;
+    const dx = (b.lon - a.lon) * Math.cos(latMid) * R;
+    const dy = (b.lat - a.lat) * R;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return null;
+    return { x: -dy / len, y: dx / len };
+  };
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const prev = pts[(i - 1 + n) % n], next = pts[(i + 1) % n];
+    let nx = 0, ny = 0;
+    // Open polylines: endpoints use their single adjacent segment;
+    // closed rings wrap around, so every point has two.
+    const normals = [];
+    if (!closed && i === 0) normals.push(segNormal(p, next));
+    else if (!closed && i === n - 1) normals.push(segNormal(prev, p));
+    else { normals.push(segNormal(prev, p), segNormal(p, next)); }
+    for (const s of normals) if (s) { nx += s.x; ny += s.y; }
+    const len = Math.hypot(nx, ny);
+    if (len > 0) { nx /= len; ny /= len; }
+    const cosLat = Math.max(0.01, Math.cos(p.lat * Math.PI / 180));
+    out.push({ lat: p.lat + ny * meters / R, lon: p.lon + nx * meters / (R * cosLat) });
+  }
+  if (closed) out.push({ ...out[0] });
+  return out;
+}
+
+// Overlapping lines: drawables whose polylines coincide exactly (same
+// points, either direction) would paint over each other, so only the
+// top one stays visible or clickable — e.g. a way both added and
+// removed in one change, or the same member way drawn by two relations.
+// Offset each duplicate sideways so every line gets its own lane:
+// offsets are symmetric around zero (two lines: -step/2, +step/2),
+// so the middle line of an odd group stays exactly on the feature.
+// Single points and connectors are left alone.
+function separateOverlappingDrawables(drawables, stepMeters) {
+  const step = stepMeters || 8;
+  const fmt = (arr) => arr.map((p) => p.lat.toFixed(7) + "," + p.lon.toFixed(7)).join("|");
+  const keyOf = (pts) => {
+    const fwd = fmt(pts), rev = fmt(pts.slice().reverse());
+    return fwd < rev ? fwd : rev;
+  };
+  const groups = new Map();
+  for (let i = 0; i < (drawables || []).length; i++) {
+    const d = drawables[i];
+    if (!d || !d.pts || d.pts.length < 2 || d.kind === "connector") continue;
+    if (!d.pts.every(hasCoords)) continue;
+    const k = keyOf(d.pts);
+    if (!groups.has(k)) groups.set(k, { firstFmt: fmt(d.pts), idx: [] });
+    groups.get(k).idx.push(i);
+  }
+  let anyDup = false;
+  for (const g of groups.values()) if (g.idx.length > 1) { anyDup = true; break; }
+  if (!anyDup) return drawables;
+  const out = drawables.slice();
+  for (const g of groups.values()) {
+    if (g.idx.length < 2) continue;
+    for (let j = 0; j < g.idx.length; j++) {
+      const off = (j - (g.idx.length - 1) / 2) * step;
+      if (!off) continue;
+      const d = drawables[g.idx[j]];
+      // Offset sign is relative to travel direction, so a duplicate
+      // stored reversed would land on the same side as the original.
+      // Normalise to the first member's direction before offsetting;
+      // a line looks the same either way round.
+      const base = fmt(d.pts) === g.firstFmt ? d.pts : d.pts.slice().reverse();
+      out[g.idx[j]] = { ...d, pts: offsetPolylinePts(base, off) };
+    }
+  }
+  return out;
+}
+
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -1825,6 +1912,9 @@ if (typeof document !== "undefined") {
     return wrap;
   }
   function addDrawablesToLayer(layers, drawables, onPick) {
+    // Coincident lines are offset sideways first, so each stays
+    // visible and clickable instead of hiding under the top one.
+    drawables = separateOverlappingDrawables(drawables);
     const bounds = [];
     for (const d of drawables) {
       // Last line of defence: drop points without real coordinates, so
