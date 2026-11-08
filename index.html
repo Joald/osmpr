@@ -1441,11 +1441,21 @@ if (typeof document !== "undefined") {
       else if (!oOk && nOk) drawables.push({ kind: "added", pts: [{ lat: newObj.lat, lon: newObj.lon }] });
       else drawables.push({ kind: "unchanged", pts: [{ lat: oldObj.lat, lon: oldObj.lon }] });
     } else if (type === "way") {
-      const changed = JSON.stringify(oldObj.nodeRefs) !== JSON.stringify(newObj.nodeRefs);
       let coordsOld, coordsNew;
       if (!bounds) {
         const coords = await fetchNodeCoords([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])]);
-        coordsOld = coordsNew = coords;
+        coordsOld = coords;
+        coordsNew = new Map(coords);
+        // Prefill: a node moved by the same pending change sits at its
+        // new position on the new side (its old position is the live
+        // one), so the way's own map shows the move instead of drawing
+        // grey. prefillComputed holds the raw changes, node entries
+        // carrying their pending lat/lon.
+        for (const [key, v] of prefillComputed) {
+          if (!key.startsWith("node:") || !v || v.lat == null || v.lon == null) continue;
+          const id = parseInt(key.slice(5), 10);
+          if (coordsNew.has(id)) coordsNew.set(id, { lat: v.lat, lon: v.lon });
+        }
       } else {
         const budget = { remaining: 1000 };
         const allRefs = [...new Set([...(oldObj.nodeRefs || []), ...(newObj.nodeRefs || [])])];
@@ -1455,16 +1465,14 @@ if (typeof document !== "undefined") {
       }
       const lineOld = (refs) => (refs || []).map((r) => coordsOld.get(r)).filter(hasCoords);
       const lineNew = (refs) => (refs || []).map((r) => coordsNew.get(r)).filter(hasCoords);
-      const oPts = lineOld(oldObj.nodeRefs), nPts = lineNew(newObj.nodeRefs);
-      if (changed) {
-        // Segment-level diff, as in the overview map: full old/new
-        // polylines hide the old under the new wherever nothing
-        // changed. Old and new segments use their own side's
-        // coordinates, so a node moved between the versions draws as
-        // removed + added.
-        const segs = waySegmentDiffDrawables(oldObj.nodeRefs, coordsOld, newObj.nodeRefs, coordsNew);
-        if (segs) drawables.push(...segs);
-      } else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
+      const oPts = lineOld(oldObj.nodeRefs);
+      // Segment diff whenever the geometry differs, not only when the
+      // node list changed: a node moved with the same refs still
+      // reshapes the way (its untouched segments read as "kept").
+      // Unchanged geometry keeps the single grey line.
+      const segs = waySegmentDiffDrawables(oldObj.nodeRefs, coordsOld, newObj.nodeRefs, coordsNew);
+      if (segs && segs.some((s) => s.kind !== "unchanged")) drawables.push(...segs);
+      else if (oPts.length >= 2) drawables.push({ kind: "unchanged", pts: oPts });
     } else if (type === "relation") {
       const budget = { remaining: 1000 };
       let geomOld, geomNew, oldSide = null, newSide = null;
@@ -1737,21 +1745,6 @@ if (typeof document !== "undefined") {
     if (live) applyLiveNodeOverrides(pairs, cache.coordsOld, cache.coordsNew, prefillComputed);
     const lineOld = (refs) => (refs || []).map((r) => cache.coordsOld.get(r)).filter(hasCoords);
     const lineNew = (refs) => (refs || []).map((r) => cache.coordsNew.get(r)).filter(hasCoords);
-    // Segment-level way diff: drawing the whole old way red and the
-    // whole new way green on top of each other hides the red under the
-    // green wherever the geometry did not change, so the way looks
-    // entirely changed. Instead, match consecutive node pairs (as a
-    // multiset, so a segment used twice counts twice): segments in
-    // both are unchanged grey, segments only in the old are removed
-    // red, segments only in the new are added green. Old and new
-    // segments use their own side's coordinates, so a node moved by
-    // the changeset draws as removed + added.
-    // The overview reuses the same segment diff as the history maps, so
-    // a moved way reads as removed + added here too (not unchanged).
-    const pushWaySegmentDiff = (oldRefs, newRefs, obj, target) => {
-      const segs = waySegmentDiffDrawables(oldRefs, cache.coordsOld, newRefs, cache.coordsNew);
-      for (const s of segs || []) drawables.push({ kind: s.kind, pts: s.pts, obj, target });
-    };
     const externalIds = [];
     for (const p of pairs) {
       for (const m of [...((p.oldObj && p.oldObj.members) || []), ...((p.newObj && p.newObj.members) || [])]) {
@@ -1865,9 +1858,16 @@ if (typeof document !== "undefined") {
           } else drawables.push({ kind: "unchanged", pts: [{ lat: o.lat, lon: o.lon }], obj, target: pi });
         } else if (o.type === "way") {
           if (!old) { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj, target: pi }); }
-          else if (JSON.stringify(old.nodeRefs || null) !== JSON.stringify(o.nodeRefs || null)) {
-            pushWaySegmentDiff(old.nodeRefs, o.nodeRefs, obj, pi);
-          } else { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
+          else {
+            // Segment diff whenever the geometry differs, not only when
+            // the node list changed: a node moved with the same refs
+            // still reshapes the way (its untouched segments read as
+            // "kept"). Unchanged geometry keeps the single grey line.
+            const segs = waySegmentDiffDrawables(old.nodeRefs, cache.coordsOld, o.nodeRefs, cache.coordsNew);
+            if (segs && segs.some((s) => s.kind !== "unchanged")) {
+              for (const s of segs) drawables.push({ kind: s.kind, pts: s.pts, obj, target: pi });
+            } else { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
+          }
         } else if (o.type === "relation") {
           const oldMembers = (old && old.members) || [];
           const newMembers = o.members || [];
