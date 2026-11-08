@@ -1725,9 +1725,16 @@ if (typeof document !== "undefined") {
     const pushWayMembers = (members, which, kind, relIndex, relId) => {
       for (const m of members || []) {
         if (m.type !== "way") continue;
+        const inChangeset = pairIndexByWayId.has(m.ref);
+        // A member way that is itself in the change already draws its
+        // own segment diff from its pair; drawing it again here as an
+        // unchanged grey member line would paint over that diff — the
+        // added green segments would vanish under the grey chord.
+        // Added and removed member draws still go through: they carry
+        // the membership change, which the way's own pair does not show.
+        if (kind === "unchanged" && inChangeset) continue;
         const pts = memberPts(m, which);
         if (!pts) continue;
-        const inChangeset = pairIndexByWayId.has(m.ref);
         drawables.push({
           kind, pts,
           obj: { type: "way", id: m.ref },
@@ -1843,7 +1850,7 @@ if (typeof document !== "undefined") {
     }
     return bounds;
   }
-  function buildOverviewMapView(pairs, cache, getCard, changesetId, emptyText) {
+  function buildOverviewMapView(pairs, cache, getCard, changesetId, emptyText, refitOnRefresh) {
     const div = document.createElement("div");
     div.className = "panel mapview";
     div.appendChild(el("p", "Loading overview map…", "muted"));
@@ -1901,7 +1908,14 @@ if (typeof document !== "undefined") {
           }
         } else {
           mapState.layers.clearLayers();
-          addDrawablesToLayer(mapState.layers, drawables, scrollToCard);
+          const bounds = addDrawablesToLayer(mapState.layers, drawables, scrollToCard);
+          // Prefill pairs arrive one card at a time, so the first fit
+          // only covers the first object; refit when later geometry
+          // lands outside the current viewport (same rule as the
+          // per-card maps). Changeset view keeps the old behaviour:
+          // its pairs are complete from the first load, so a refresh
+          // must never yank pan/zoom.
+          if (refitOnRefresh && bounds.length && !mapState.map.getBounds().contains(L.latLngBounds(bounds))) mapState.map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
           if (truncated && !mapState.note) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
         }
         div.dataset.drawn = "1";
@@ -2189,7 +2203,7 @@ if (typeof document !== "undefined") {
     const overviewPairs = [];
     const overviewCards = [];
     const overviewCache = { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
-    const overview = buildOverviewMapView(overviewPairs, overviewCache, (i) => overviewCards[i], null, "No drawable geometry for these changes.");
+    const overview = buildOverviewMapView(overviewPairs, overviewCache, (i) => overviewCards[i], null, "No drawable geometry for these changes.", true);
     $("preview").appendChild(overview);
     for (const change of prefill.changes) {
       const card = el("div", null, "obj");
