@@ -1439,7 +1439,7 @@ if (typeof document !== "undefined") {
     }
     if (!map.getBounds().contains(L.latLngBounds(bounds))) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
   }
-  function buildMapView(oldObj, newObj, bounds) {
+  function buildMapView(oldObj, newObj, bounds, opts) {
     const div = document.createElement("div");
     div.className = "mapview";
     div.hidden = true;
@@ -1461,7 +1461,7 @@ if (typeof document !== "undefined") {
       }
     };
     div.load = () => {
-      if (!loadPromise) loadPromise = render(oldObj, newObj, bounds);
+      if (!loadPromise) loadPromise = render(oldObj, newObj, bounds, opts);
       return loadPromise;
     };
     // Re-collect geometry for another old/new pair and redraw it in the
@@ -2623,7 +2623,8 @@ if (typeof document !== "undefined") {
           ? { old: { changeset: base.changeset, inclusive: true }, new: { changeset: ev.changeset, inclusive: true } }
           : null;
         if (!mapView) {
-          mapView = buildMapView(base, base, histBounds);
+          const hlOpts = ev.objType === "node" ? { highlightNode: { old: ev.oldPos, new: ev.newPos } } : { highlightWay: ev.obj };
+          mapView = buildMapView(base, base, histBounds, hlOpts);
           mapView.hidden = false;
           mapSlot.appendChild(mapView);
           mapView.load();
