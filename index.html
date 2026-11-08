@@ -793,6 +793,57 @@ function buildOsmChange(changesetId, items) {
   return s;
 }
 
+const hasCoords = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
+function waySegmentDiffDrawables(oldRefs, oldCoords, newRefs, newCoords) {
+  // Segment-level diff of one way between two sides: consecutive node
+  // pairs matched as a multiset; common segments unchanged, the rest
+  // removed (old side) / added (new side). Returns null when either
+  // side has no segments to compare.
+  // A segment matches only when its node-id pair AND its coordinates
+  // agree (coordinates compared order-insensitively, so a reversed way
+  // still matches): a way whose nodes moved with the same refs shows
+  // its old segments as removed and its new segments as added, instead
+  // of drawing grey as if nothing changed.
+  if (!oldRefs || !newRefs || !oldCoords || !newCoords) return null;
+  const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
+  const segGeom = (pts) => {
+    const s = (c) => c.lat + "," + c.lon;
+    const [p, q] = pts;
+    return s(p) < s(q) ? s(p) + "|" + s(q) : s(q) + "|" + s(p);
+  };
+  const waySegments = (refs, coords) => {
+    const segs = [];
+    for (let k = 0; k + 1 < (refs || []).length; k++) {
+      const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
+      if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), geom: segGeom([a, b]), pts: [a, b] });
+    }
+    return segs;
+  };
+  const oldSegs = waySegments(oldRefs, oldCoords), newSegs = waySegments(newRefs, newCoords);
+  if (!oldSegs.length && !newSegs.length) return null;
+  const out = [];
+  // New segments grouped by node-id key; a match consumes one with
+  // identical geometry, so a moved segment falls through to
+  // removed + added instead of matching as unchanged.
+  const newByKey = new Map();
+  for (const s of newSegs) {
+    if (!newByKey.has(s.key)) newByKey.set(s.key, []);
+    newByKey.get(s.key).push(s);
+  }
+  const consumed = new Set();
+  for (const s of oldSegs) {
+    const pool = newByKey.get(s.key) || [];
+    const i = pool.findIndex((t) => t.geom === s.geom);
+    if (i >= 0) { consumed.add(pool[i]); pool.splice(i, 1); }
+    else out.push({ kind: "removed", pts: s.pts });
+  }
+  for (const s of newSegs) {
+    if (consumed.has(s)) out.push({ kind: "unchanged", pts: s.pts });
+    else out.push({ kind: "added", pts: s.pts });
+  }
+  return out;
+}
+
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -1063,24 +1114,37 @@ if (typeof document !== "undefined") {
   // {lat: undefined, lon: undefined} object, which Leaflet rejects with
   // "Invalid LatLng object: (undefined, undefined)" and which used to
   // wipe the whole overview map via its catch.
-  const hasCoords = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lon);
   const cleanPts = (pts) => (pts || []).filter(hasCoords);
   async function fetchNodeCoords(ids) {
     const out = new Map();
     const uniq = [...new Set((ids || []).filter(Number.isInteger))];
-    for (let i = 0; i < uniq.length; i += 100) {
-      const chunk = uniq.slice(i, i + 100);
+    const chunks = [];
+    for (let i = 0; i < uniq.length; i += 100) chunks.push(uniq.slice(i, i + 100));
+    const results = await Promise.all(chunks.map(async (chunk) => {
       const res = await fetch(API_BASE + "/nodes.json?nodes=" + chunk.join(","));
       if (!res.ok) throw new Error("Node fetch failed (" + res.status + ")");
-      const data = await res.json();
-      for (const e of data.elements || []) if (e.type === "node" && hasCoords(e)) out.set(e.id, { lat: e.lat, lon: e.lon });
-    }
+      return (await res.json()).elements || [];
+    }));
+    for (const els of results) for (const e of els) if (e.type === "node" && hasCoords(e)) out.set(e.id, { lat: e.lat, lon: e.lon });
     return out;
   }
+  // Session caches for immutable history data: a version as of a
+  // changeset never changes, so a cached history, or a way's refs as of
+  // a bound, stays correct for the whole session (no invalidation).
+  // Current-geometry fetches are NOT cached — live data can change
+  // mid-session. The history map reuses these across version switches
+  // (walking the timeline revisits the same bounds), so a switch only
+  // fetches what no earlier switch resolved yet.
+  const historyCache = new Map(); // "type:id" -> elements
+  const wayRefsCache = new Map(); // "wid:changeset:inclusive" -> refs|null
   async function fetchHistoryElements(type, id) {
+    const key = type + ":" + id;
+    if (historyCache.has(key)) return historyCache.get(key);
     const res = await fetch(API_BASE + "/" + type + "/" + id + "/history.json");
     if (!res.ok) throw new Error("History fetch failed (" + res.status + ") for " + type + " " + id + ".");
-    return (await res.json()).elements || [];
+    const els = (await res.json()).elements || [];
+    historyCache.set(key, els);
+    return els;
   }
   async function fetchAllChunked(items, fn, size, onChunk) {
     // Parallel fetches in chunks; a failed item resolves to null instead
@@ -1159,53 +1223,69 @@ if (typeof document !== "undefined") {
   async function fetchNodeCoordsWithChangesets(ids) {
     // Batched current fetch, keeping each node's current changeset so
     // the temporal resolver can tell untouched nodes (no history call)
-    // from nodes changed or deleted since the bound.
+    // from nodes changed or deleted since the bound. Chunks fetch in
+    // parallel; a failed chunk still fails the whole call, as before.
     const out = new Map();
     const uniq = [...new Set((ids || []).filter(Number.isInteger))];
-    for (let i = 0; i < uniq.length; i += 100) {
-      const chunk = uniq.slice(i, i + 100);
+    const chunks = [];
+    for (let i = 0; i < uniq.length; i += 100) chunks.push(uniq.slice(i, i + 100));
+    const results = await Promise.all(chunks.map(async (chunk) => {
       const res = await fetch(API_BASE + "/nodes.json?nodes=" + chunk.join(","));
       if (!res.ok) throw new Error("Node fetch failed (" + res.status + ")");
-      const data = await res.json();
-      for (const e of data.elements || []) if (e.type === "node" && hasCoords(e)) out.set(e.id, { lat: e.lat, lon: e.lon, changeset: e.changeset });
-    }
+      return (await res.json()).elements || [];
+    }));
+    for (const els of results) for (const e of els) if (e.type === "node" && hasCoords(e)) out.set(e.id, { lat: e.lat, lon: e.lon, changeset: e.changeset });
     return out;
   }
   async function resolveCoordsAtBound(ids, currentMap, bound, budget) {
     // Coordinates of nodes as of a changeset bound. Untouched nodes
     // (current changeset within bound) come from the batched current
-    // fetch; only nodes changed or deleted since need a history call.
+    // fetch; only nodes changed or deleted since need a history call,
+    // resolved 10-parallel (their histories are cached, so revisits
+    // cost no request).
     const out = new Map();
     if (!bound) return out;
+    const needHistory = [];
     for (const nid of [...new Set(ids || [])]) {
       const cur = currentMap.get(nid);
       if (cur && boundOk(cur.changeset, bound)) { out.set(nid, { lat: cur.lat, lon: cur.lon }); continue; }
-      if (budget.remaining <= 0) continue;
-      budget.remaining--;
-      try {
-        const ver = pickVersionAtChangeset(await fetchHistoryElements("node", nid), bound.changeset, bound.inclusive);
-        if (ver && hasCoords(ver)) out.set(nid, { lat: ver.lat, lon: ver.lon });
-      } catch (e) { /* leave missing */ }
+      needHistory.push(nid);
     }
+    const resolved = await fetchAllChunked(needHistory, async (nid) => {
+      if (budget.remaining <= 0) return null;
+      budget.remaining--;
+      const ver = pickVersionAtChangeset(await fetchHistoryElements("node", nid), bound.changeset, bound.inclusive);
+      return (ver && hasCoords(ver)) ? { lat: ver.lat, lon: ver.lon } : null;
+    }, 10);
+    for (const [k, v] of resolved) out.set(k, v);
     return out;
   }
   async function fetchWayRefsAtBound(wid, bound, budget) {
     // Node refs of a way as of a changeset bound: current refs when the
     // way's current version is within bound, else the history version.
+    // The answer is cached (immutable for its bound) so revisiting a
+    // version costs no request at all.
     if (!bound) return null;
+    const key = wid + ":" + bound.changeset + ":" + (bound.inclusive ? 1 : 0);
+    if (wayRefsCache.has(key)) return wayRefsCache.get(key);
+    let refs = null;
     try {
       const res = await fetch(API_BASE + "/way/" + wid + ".json");
       if (res.ok) {
         const el = ((await res.json()).elements || [])[0];
-        if (el && Array.isArray(el.nodes) && boundOk(el.changeset, bound)) return el.nodes;
+        if (el && Array.isArray(el.nodes) && boundOk(el.changeset, bound)) refs = el.nodes;
       }
     } catch (e) { /* fall through to history */ }
-    if (budget.remaining <= 0) return null;
-    budget.remaining--;
-    try {
-      const ver = pickVersionAtChangeset(await fetchHistoryElements("way", wid), bound.changeset, bound.inclusive);
-      return (ver && ver.nodes) || null;
-    } catch (e) { return null; }
+    if (refs == null) {
+      if (budget.remaining <= 0) return null;
+      budget.remaining--;
+      try {
+        const ver = pickVersionAtChangeset(await fetchHistoryElements("way", wid), bound.changeset, bound.inclusive);
+        refs = (ver && ver.nodes) || null;
+      } catch (e) { return null; }
+    }
+    wayRefsCache.set(key, refs);
+    return refs;
   }
   async function fetchObjectFull(type, id) {
     const res = await fetch(API_BASE + "/" + type + "/" + id + "/full.json");
@@ -1219,37 +1299,6 @@ if (typeof document !== "undefined") {
       else if (e.type === type && e.id === id && e.members) members = e.members.map((m) => ({ type: m.type, ref: m.ref, role: m.role || "" }));
     }
     return { members, wayNodes, nodeCoords };
-  }
-  function waySegmentDiffDrawables(oldRefs, oldCoords, newRefs, newCoords) {
-    // Segment-level diff of one way between two sides: consecutive node
-    // pairs matched as a multiset; common segments unchanged, the rest
-    // removed (old side) / added (new side). Returns null when either
-    // side has no segments to compare.
-    if (!oldRefs || !newRefs || !oldCoords || !newCoords) return null;
-    const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
-    const waySegments = (refs, coords) => {
-      const segs = [];
-      for (let k = 0; k + 1 < (refs || []).length; k++) {
-        const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
-        if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), pts: [a, b] });
-      }
-      return segs;
-    };
-    const oldSegs = waySegments(oldRefs, oldCoords), newSegs = waySegments(newRefs, newCoords);
-    if (!oldSegs.length && !newSegs.length) return null;
-    const out = [];
-    const newCounts = new Map();
-    for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
-    const matched = new Map();
-    for (const s of oldSegs) {
-      if ((newCounts.get(s.key) || 0) > 0) { newCounts.set(s.key, newCounts.get(s.key) - 1); matched.set(s.key, (matched.get(s.key) || 0) + 1); }
-      else out.push({ kind: "removed", pts: s.pts });
-    }
-    for (const s of newSegs) {
-      if ((matched.get(s.key) || 0) > 0) { matched.set(s.key, matched.get(s.key) - 1); out.push({ kind: "unchanged", pts: s.pts }); }
-      else out.push({ kind: "added", pts: s.pts });
-    }
-    return out;
   }
   async function collectMapDrawables(oldObj, newObj, bounds, opts) {
     // Drawables: {kind, pts: [{lat, lon}]}. kind: unchanged | added | removed | old | new | connector.
@@ -1344,16 +1393,15 @@ if (typeof document !== "undefined") {
         // external-way cap.
         const sideGeom = async (members, bound) => {
           const geom = new Map();
-          const refsByWay = new Map(), coords = new Map();
-          if (!bound) return { geom, refsByWay, coords };
+          const coords = new Map();
+          if (!bound) return { geom, refsByWay: new Map(), coords };
           const ways = [];
           for (const m of members || []) {
             if (m.type === "way" && m.ref >= 0 && !ways.includes(m.ref)) ways.push(m.ref);
           }
-          for (const wid of ways.slice(0, 200)) {
-            const refs = await fetchWayRefsAtBound(wid, bound, budget);
-            if (refs) refsByWay.set(wid, refs);
-          }
+          // Way refs resolve 10-parallel; the refs cache makes revisits
+          // free, and the shared budget still caps history fetches.
+          const refsByWay = await fetchAllChunked(ways.slice(0, 200), (wid) => fetchWayRefsAtBound(wid, bound, budget), 10);
           const nodeIds = [...new Set([...refsByWay.values()].flat())];
           const currentMap = await fetchNodeCoordsWithChangesets(nodeIds);
           const resolved = await resolveCoordsAtBound(nodeIds, currentMap, bound, budget);
@@ -1562,28 +1610,11 @@ if (typeof document !== "undefined") {
     // red, segments only in the new are added green. Old and new
     // segments use their own side's coordinates, so a node moved by
     // the changeset draws as removed + added.
-    const segKey = (a, b) => (a < b ? a + ">" + b : b + ">" + a);
-    const waySegments = (refs, coords) => {
-      const segs = [];
-      for (let k = 0; k + 1 < (refs || []).length; k++) {
-        const a = coords.get(refs[k]), b = coords.get(refs[k + 1]);
-        if (hasCoords(a) && hasCoords(b)) segs.push({ key: segKey(refs[k], refs[k + 1]), pts: [a, b] });
-      }
-      return segs;
-    };
+    // The overview reuses the same segment diff as the history maps, so
+    // a moved way reads as removed + added here too (not unchanged).
     const pushWaySegmentDiff = (oldRefs, newRefs, obj, target) => {
-      const oldSegs = waySegments(oldRefs, cache.coordsOld), newSegs = waySegments(newRefs, cache.coordsNew);
-      const newCounts = new Map();
-      for (const s of newSegs) newCounts.set(s.key, (newCounts.get(s.key) || 0) + 1);
-      const matched = new Map();
-      for (const s of oldSegs) {
-        if ((newCounts.get(s.key) || 0) > 0) { newCounts.set(s.key, newCounts.get(s.key) - 1); matched.set(s.key, (matched.get(s.key) || 0) + 1); }
-        else drawables.push({ kind: "removed", pts: s.pts, obj, target });
-      }
-      for (const s of newSegs) {
-        if ((matched.get(s.key) || 0) > 0) { matched.set(s.key, matched.get(s.key) - 1); drawables.push({ kind: "unchanged", pts: s.pts, obj, target }); }
-        else drawables.push({ kind: "added", pts: s.pts, obj, target });
-      }
+      const segs = waySegmentDiffDrawables(oldRefs, cache.coordsOld, newRefs, cache.coordsNew);
+      for (const s of segs || []) drawables.push({ kind: s.kind, pts: s.pts, obj, target });
     };
     const externalIds = [];
     for (const p of pairs) {

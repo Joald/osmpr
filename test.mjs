@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -525,5 +525,32 @@ assert.deepEqual(exGap.find((e) => e.obj === EN2 && e.changeset === 150).newPos,
 // version -> no event at all.
 assert.ok(!exGap.some((e) => e.obj === 7104));
 assert.equal(ex.versionDetails.size, 0);
+
+// --- way segment diff: a moved node reads as removed + added ---
+const SA = 1, SB = 2, SC = 3;
+const segOldC = new Map([[SA, { lat: 0, lon: 0 }], [SB, { lat: 0, lon: 1 }], [SC, { lat: 0, lon: 2 }]]);
+const segSameC = new Map([[SA, { lat: 0, lon: 0 }], [SB, { lat: 0, lon: 1 }], [SC, { lat: 0, lon: 2 }]]);
+const segMovedC = new Map([[SA, { lat: 0, lon: 0 }], [SB, { lat: 1, lon: 1 }], [SC, { lat: 0, lon: 2 }]]);
+// Same refs, same coords -> all unchanged.
+const sdSame = waySegmentDiffDrawables([SA, SB, SC], segOldC, [SA, SB, SC], segSameC);
+assert.equal(sdSame.length, 2);
+assert.ok(sdSame.every((s) => s.kind === "unchanged"));
+// Same refs, middle node moved -> both adjacent segments removed (old
+// positions) + added (new positions); nothing unchanged. (The old
+// key-only matching drew this grey.)
+const sdMoved = waySegmentDiffDrawables([SA, SB, SC], segOldC, [SA, SB, SC], segMovedC);
+assert.equal(sdMoved.filter((s) => s.kind === "removed").length, 2);
+assert.equal(sdMoved.filter((s) => s.kind === "added").length, 2);
+assert.equal(sdMoved.filter((s) => s.kind === "unchanged").length, 0);
+// Reversed refs, same coords -> unchanged (geometry is the same).
+const sdRev = waySegmentDiffDrawables([SA, SB, SC], segOldC, [SC, SB, SA], segSameC);
+assert.equal(sdRev.length, 2);
+assert.ok(sdRev.every((s) => s.kind === "unchanged"));
+// Node added -> one added segment, the rest unchanged.
+const sdAdd = waySegmentDiffDrawables([SA, SB], segOldC, [SA, SB, SC], segSameC);
+assert.equal(sdAdd.filter((s) => s.kind === "added").length, 1);
+assert.equal(sdAdd.filter((s) => s.kind === "unchanged").length, 1);
+// No segments on either side -> null.
+assert.equal(waySegmentDiffDrawables([SA], segOldC, [SA], segSameC), null);
 
 console.log("All editor logic tests passed.");
