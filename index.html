@@ -844,6 +844,34 @@ function waySegmentDiffDrawables(oldRefs, oldCoords, newRefs, newCoords) {
   return out;
 }
 
+// Live (prefill) overview: both sides start from today's coordinates,
+// then node changes in the pending change override them — a moved node
+// sits at its old position on the old side and its new position on the
+// new side, a created node only on the new side, a deleted node only on
+// the old side. Placeholder nodes (negative ids) take their coordinates
+// from the prefill itself, since they do not exist on OSM yet.
+function applyLiveNodeOverrides(pairs, coordsOld, coordsNew, prefillGeom) {
+  for (const p of pairs || []) {
+    const old = p.oldObj, nw = p.newObj;
+    if (old && old.type === "node") {
+      if (hasCoords(old)) coordsOld.set(old.id, { lat: old.lat, lon: old.lon });
+      if (!nw || nw.lat == null || nw.lon == null) coordsNew.delete(old.id);
+    }
+    if (nw && nw.type === "node") {
+      if (hasCoords(nw)) coordsNew.set(nw.id, { lat: nw.lat, lon: nw.lon });
+      if (!old) coordsOld.delete(nw.id);
+    }
+  }
+  if (prefillGeom) {
+    for (const [key, v] of prefillGeom) {
+      if (!key.startsWith("node:") || !v || v.lat == null || v.lon == null) continue;
+      const id = parseInt(key.slice(5), 10);
+      coordsNew.set(id, { lat: v.lat, lon: v.lon });
+      if (id < 0) coordsOld.delete(id);
+    }
+  }
+}
+
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -1570,11 +1598,14 @@ if (typeof document !== "undefined") {
     // later), so a refresh only fetches coordinates it has not seen yet.
     // Coordinates are per side and temporal: old = as of before the
     // changeset (exclusive bound), new = as of the changeset (inclusive
-    // bound). Without a changeset id the maps draw nothing rather than
-    // today's geometry.
+    // bound). Without a changeset id the overview is live (prefill):
+    // both sides start from today's coordinates, and node changes in
+    // the pending change override them (see applyLiveNodeOverrides),
+    // so a moved node still draws as removed + added.
     const csNum = changesetId == null ? null : parseInt(changesetId, 10);
-    const oldBound = csNum == null || !Number.isFinite(csNum) ? null : { changeset: csNum, inclusive: false };
-    const newBound = csNum == null || !Number.isFinite(csNum) ? null : { changeset: csNum, inclusive: true };
+    const live = csNum == null || !Number.isFinite(csNum);
+    const oldBound = live ? null : { changeset: csNum, inclusive: false };
+    const newBound = live ? null : { changeset: csNum, inclusive: true };
     cache = cache || { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
     const budget = { remaining: 1000 };
     // pairs: {action, oldObj, newObj}; oldObj is null when the previous
@@ -1592,13 +1623,26 @@ if (typeof document !== "undefined") {
     }
     const fillSide = async (cacheMap, bound, ids) => {
       const missing = [...new Set(ids || [])].filter((id) => !cacheMap.has(id));
-      if (!missing.length || !bound) return;
+      if (!missing.length) return;
+      if (!bound) {
+        // Live (prefill) mode: today's coordinates for both sides; the
+        // pending node moves are layered on top by
+        // applyLiveNodeOverrides. Placeholder (negative) ids do not
+        // exist on OSM — their coordinates come from the prefill
+        // itself, not the API.
+        const liveIds = missing.filter((id) => id >= 0);
+        if (!liveIds.length) return;
+        const coords = await fetchNodeCoords(liveIds);
+        for (const [k, v] of coords) cacheMap.set(k, v);
+        return;
+      }
       const currentMap = await fetchNodeCoordsWithChangesets(missing);
       const resolved = await resolveCoordsAtBound(missing, currentMap, bound, budget);
       for (const [k, v] of resolved) cacheMap.set(k, v);
     };
     await fillSide(cache.coordsOld, oldBound, nodeIds);
     await fillSide(cache.coordsNew, newBound, nodeIds);
+    if (live) applyLiveNodeOverrides(pairs, cache.coordsOld, cache.coordsNew, prefillComputed);
     const lineOld = (refs) => (refs || []).map((r) => cache.coordsOld.get(r)).filter(hasCoords);
     const lineNew = (refs) => (refs || []).map((r) => cache.coordsNew.get(r)).filter(hasCoords);
     // Segment-level way diff: drawing the whole old way red and the
@@ -1626,19 +1670,41 @@ if (typeof document !== "undefined") {
     }
     const truncated = externalIds.length > 200;
     const extRefsOld = new Map(), extRefsNew = new Map();
-    for (const wid of externalIds.slice(0, 200)) {
-      if (!cache.externalOld.has(wid)) {
-        const refs = await fetchWayRefsAtBound(wid, oldBound, budget);
-        if (refs) extRefsOld.set(wid, refs);
-      }
-      if (!cache.externalNew.has(wid)) {
-        const refs = await fetchWayRefsAtBound(wid, newBound, budget);
-        if (refs) extRefsNew.set(wid, refs);
+    if (live) {
+      // Live mode: current refs for both sides (an external way's refs
+      // do not change in this pending change); placeholder ways take
+      // their refs from the prefill itself. Ways already drawn from
+      // the cache need no refetch.
+      const uncached = externalIds.slice(0, 200).filter((wid) => !cache.externalOld.has(wid) || !cache.externalNew.has(wid));
+      const got = await fetchAllChunked(uncached, async (wid) => {
+        if (wid < 0) {
+          const pre = prefillComputed.get("way:" + wid);
+          return pre && pre.nodeRefs ? pre.nodeRefs : null;
+        }
+        try {
+          const res = await fetch(API_BASE + "/way/" + wid + ".json");
+          if (!res.ok) return null;
+          const el = ((await res.json()).elements || [])[0];
+          return el && Array.isArray(el.nodes) ? el.nodes : null;
+        } catch (e) { return null; }
+      }, 10);
+      for (const [wid, refs] of got) { extRefsOld.set(wid, refs); extRefsNew.set(wid, refs); }
+    } else {
+      for (const wid of externalIds.slice(0, 200)) {
+        if (!cache.externalOld.has(wid)) {
+          const refs = await fetchWayRefsAtBound(wid, oldBound, budget);
+          if (refs) extRefsOld.set(wid, refs);
+        }
+        if (!cache.externalNew.has(wid)) {
+          const refs = await fetchWayRefsAtBound(wid, newBound, budget);
+          if (refs) extRefsNew.set(wid, refs);
+        }
       }
     }
     const extNodeIds = [...new Set([...extRefsOld.values(), ...extRefsNew.values()].flat())];
     await fillSide(cache.coordsOld, oldBound, extNodeIds);
     await fillSide(cache.coordsNew, newBound, extNodeIds);
+    if (live) applyLiveNodeOverrides(pairs, cache.coordsOld, cache.coordsNew, prefillComputed);
     for (const [wid, refs] of extRefsOld) {
       const pts = refs.map((r) => cache.coordsOld.get(r)).filter(hasCoords);
       if (pts.length >= 2) cache.externalOld.set(wid, pts);
@@ -1777,7 +1843,7 @@ if (typeof document !== "undefined") {
     }
     return bounds;
   }
-  function buildOverviewMapView(pairs, cache, getCard, changesetId) {
+  function buildOverviewMapView(pairs, cache, getCard, changesetId, emptyText) {
     const div = document.createElement("div");
     div.className = "panel mapview";
     div.appendChild(el("p", "Loading overview map…", "muted"));
@@ -1812,7 +1878,7 @@ if (typeof document !== "undefined") {
       try {
         const { drawables, truncated } = await collectOverviewDrawables(pairs, cache, changesetId);
         if (!drawables.length) {
-          if (!mapState) { div.innerHTML = ""; div.appendChild(el("p", "No drawable geometry for this changeset.", "muted")); }
+          if (!mapState) { div.innerHTML = ""; div.appendChild(el("p", emptyText || "No drawable geometry for this changeset.", "muted")); }
         } else if (!mapState) {
           div.innerHTML = "";
           const mapDiv = document.createElement("div");
@@ -1831,7 +1897,7 @@ if (typeof document !== "undefined") {
           } else {
             // Every drawable cleaned to nothing: no map, no fitBounds([]).
             div.innerHTML = "";
-            div.appendChild(el("p", "No drawable geometry for this changeset.", "muted"));
+            div.appendChild(el("p", emptyText || "No drawable geometry for this changeset.", "muted"));
           }
         } else {
           mapState.layers.clearLayers();
@@ -2117,6 +2183,14 @@ if (typeof document !== "undefined") {
     items = [];
     prefillComputed = new Map();
     for (const ch of prefill.changes) prefillComputed.set(ch.type + ":" + ch.id, { nodeRefs: ch.nodes || null, lat: ch.lat, lon: ch.lon });
+    // Overview map for the whole pending change, like the changeset
+    // view: one map summing every object, filled in as its card loads
+    // (each finished item appends its pair and refreshes the map).
+    const overviewPairs = [];
+    const overviewCards = [];
+    const overviewCache = { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
+    const overview = buildOverviewMapView(overviewPairs, overviewCache, (i) => overviewCards[i], null, "No drawable geometry for these changes.");
+    $("preview").appendChild(overview);
     for (const change of prefill.changes) {
       const card = el("div", null, "obj");
       const lh = el("h3", null);
@@ -2152,6 +2226,15 @@ if (typeof document !== "undefined") {
           item.computed = applyOps(current, change);
         }
         renderItem(item);
+        // The overview pair for this object: current live state against
+        // the computed pending state, like one entry of a changeset.
+        const comp = item.computed;
+        const newObj = { type: change.type, id: change.id, tags: comp.tags, members: comp.members, lat: comp.lat, lon: comp.lon, nodeRefs: comp.nodeRefs };
+        if (change.id < 0) overviewPairs.push({ action: "create", oldObj: null, newObj });
+        else if (comp.deleted) overviewPairs.push({ action: "delete", oldObj: current, newObj: null });
+        else overviewPairs.push({ action: "modify", oldObj: current, newObj });
+        overviewCards.push(item.card);
+        overview.load();
       } catch (e) {
         item.error = e.message;
         item.deleted = !!e.deleted;
@@ -2159,6 +2242,9 @@ if (typeof document !== "undefined") {
       }
       updateUploadButton();
     }
+    // Renders the empty state when no pair had drawable geometry (e.g.
+    // every item errored); otherwise a final refresh with all pairs.
+    overview.load();
   }
   function renderItem(item) {
     const card = item.card;

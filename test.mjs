@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -552,5 +552,28 @@ assert.equal(sdAdd.filter((s) => s.kind === "added").length, 1);
 assert.equal(sdAdd.filter((s) => s.kind === "unchanged").length, 1);
 // No segments on either side -> null.
 assert.equal(waySegmentDiffDrawables([SA], segOldC, [SA], segSameC), null);
+
+// --- live overview node overrides (prefill map): old/new sides ---
+// Both sides start from today's coordinates; the pending node changes
+// override them, so a moved node, a created node and a deleted node
+// each land on the right side only.
+const ovOld = new Map([[11, { lat: 0, lon: 0 }], [12, { lat: 1, lon: 1 }], [13, { lat: 2, lon: 2 }]]);
+const ovNew = new Map([[11, { lat: 0, lon: 0 }], [12, { lat: 1, lon: 1 }], [13, { lat: 2, lon: 2 }]]);
+const ovPairs = [
+  { action: "modify", oldObj: { type: "node", id: 11, lat: 0, lon: 0 }, newObj: { type: "node", id: 11, lat: 0.5, lon: 0.5 } },
+  { action: "create", oldObj: null, newObj: { type: "node", id: 14, lat: 3, lon: 3 } },
+  { action: "delete", oldObj: { type: "node", id: 12, lat: 1, lon: 1 }, newObj: null },
+  { action: "modify", oldObj: { type: "way", id: 20, nodeRefs: [11, 13] }, newObj: { type: "way", id: 20, nodeRefs: [11, 13] } },
+];
+const ovPrefill = new Map([["node:-5", { nodeRefs: null, lat: 4, lon: 4 }]]);
+applyLiveNodeOverrides(ovPairs, ovOld, ovNew, ovPrefill);
+assert.deepEqual(ovOld.get(11), { lat: 0, lon: 0 });
+assert.deepEqual(ovNew.get(11), { lat: 0.5, lon: 0.5 });
+assert.ok(!ovOld.has(14) && !ovNew.has(12), "create only on the new side, delete only on the old side");
+assert.deepEqual(ovNew.get(14), { lat: 3, lon: 3 });
+assert.deepEqual(ovOld.get(12), { lat: 1, lon: 1 });
+assert.deepEqual(ovNew.get(13), { lat: 2, lon: 2 }, "untouched node keeps live coords on both sides");
+assert.deepEqual(ovNew.get(-5), { lat: 4, lon: 4 });
+assert.ok(!ovOld.has(-5), "placeholder node has no old position");
 
 console.log("All editor logic tests passed.");

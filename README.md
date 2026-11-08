@@ -22,6 +22,9 @@ shareable link: open the link, review the diff, click Upload.
    Nodes / Ways / Relations sections, and an overview map between
    the changeset description and the cards shows every changed
    object on one map (nodes, ways, and relation member ways).
+   Prefill view has the same overview map above its cards: it sums
+   the whole pending change (current state against the computed new
+   state), filling in as each object loads.
 3. You click **Upload**. The page creates one changeset, uploads every
    changed object, and closes the changeset. A toast confirms the
    upload, and the page switches to the new changeset's view. A failed
@@ -125,7 +128,12 @@ present, `d` wins.
   have a separator and a chevron to collapse them.
 - The changeset overview map reuses one batched node-coordinate
   fetch and one fetch per external relation member way (capped at
-  200), instead of one fetch per card. Coordinates without a real
+  200), instead of one fetch per card. The prefill view uses the
+  same map live: both sides start from today's coordinates, and
+  a node moved by the pending change draws at its old position
+  on the old side and its new position on the new side (created
+  nodes only on the new side, deleted nodes only on the old side).
+  Coordinates without a real
   lat/lon (e.g. a deleted node referenced by a way) are skipped
   instead of breaking the map, and the renderers drop any
   remaining invalid points, so one bad drawable never wipes the
