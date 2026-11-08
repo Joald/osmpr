@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, offsetPolylinePts, separateOverlappingDrawables };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, offsetPolylinePts, separateOverlappingDrawables } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -546,10 +546,22 @@ assert.equal(sdMoved.filter((s) => s.kind === "unchanged").length, 0);
 const sdRev = waySegmentDiffDrawables([SA, SB, SC], segOldC, [SC, SB, SA], segSameC);
 assert.equal(sdRev.length, 2);
 assert.ok(sdRev.every((s) => s.kind === "unchanged"));
-// Node added -> one added segment, the rest unchanged.
+// Node added -> one added segment, the rest kept (orange: the way
+// changed, only that segment did not).
 const sdAdd = waySegmentDiffDrawables([SA, SB], segOldC, [SA, SB, SC], segSameC);
 assert.equal(sdAdd.filter((s) => s.kind === "added").length, 1);
-assert.equal(sdAdd.filter((s) => s.kind === "unchanged").length, 1);
+assert.equal(sdAdd.filter((s) => s.kind === "kept").length, 1);
+assert.equal(sdAdd.filter((s) => s.kind === "unchanged").length, 0);
+// Four nodes, one middle node moved: the two adjacent segments are
+// removed + added, the segment between the two untouched nodes is kept.
+const SD = 4;
+const segOldD = new Map([[SA, { lat: 0, lon: 0 }], [SB, { lat: 0, lon: 1 }], [SC, { lat: 0, lon: 2 }], [SD, { lat: 0, lon: 3 }]]);
+const segMovedD = new Map([[SA, { lat: 0, lon: 0 }], [SB, { lat: 1, lon: 1 }], [SC, { lat: 0, lon: 2 }], [SD, { lat: 0, lon: 3 }]]);
+const sdPartial = waySegmentDiffDrawables([SA, SB, SC, SD], segOldD, [SA, SB, SC, SD], segMovedD);
+assert.equal(sdPartial.filter((s) => s.kind === "removed").length, 2);
+assert.equal(sdPartial.filter((s) => s.kind === "added").length, 2);
+assert.equal(sdPartial.filter((s) => s.kind === "kept").length, 1);
+assert.deepEqual(sdPartial.find((s) => s.kind === "kept").pts, [{ lat: 0, lon: 2 }, { lat: 0, lon: 3 }]);
 // No segments on either side -> null.
 assert.equal(waySegmentDiffDrawables([SA], segOldC, [SA], segSameC), null);
 
@@ -576,54 +588,59 @@ assert.deepEqual(ovNew.get(13), { lat: 2, lon: 2 }, "untouched node keeps live c
 assert.deepEqual(ovNew.get(-5), { lat: 4, lon: 4 });
 assert.ok(!ovOld.has(-5), "placeholder node has no old position");
 
-// --- overlapping-line separation: offset + grouping ---
-// Straight eastward line at the equator: positive offset is left of
-// travel, i.e. north; 111320 m is one degree of latitude.
-const offLine = [{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 0, lon: 2 }];
-const offNorth = offsetPolylinePts(offLine, 111320);
-assert.deepEqual(offNorth.map((p) => [p.lat, p.lon]), [[1, 0], [1, 1], [1, 2]]);
-const offSouth = offsetPolylinePts(offLine, -111320);
-assert.deepEqual(offSouth.map((p) => [p.lat, p.lon]), [[-1, 0], [-1, 1], [-1, 2]]);
-assert.equal(offsetPolylinePts(offLine, 0), offLine, "zero offset returns the input");
-// L-shaped line: the corner averages the eastward (north) and
-// northward (west) normals, so a 111320*sqrt(2) m offset moves it
-// exactly (+1 lat, -1 lon); endpoints follow their single segment
-// (start: +sqrt(2) lat, end: -sqrt(2)/cos(1 deg) lon).
-const offL = offsetPolylinePts([{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 1, lon: 1 }], 111320 * Math.SQRT2);
-assert.ok(Math.abs(offL[0].lat - Math.SQRT2) < 1e-9 && Math.abs(offL[0].lon) < 1e-9);
-assert.ok(Math.abs(offL[1].lat - 1) < 1e-9 && Math.abs(offL[1].lon) < 1e-9);
-assert.ok(Math.abs(offL[2].lat - 1) < 1e-9);
-assert.ok(Math.abs(offL[2].lon - (1 - Math.SQRT2 / Math.cos(Math.PI / 180))) < 1e-9);
-// Closed ring stays closed and shrinks (counter-clockwise ring, left
-// is inward): first == last, and the corners move inward.
-const offRing = offsetPolylinePts([{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 1, lon: 1 }, { lat: 1, lon: 0 }, { lat: 0, lon: 0 }], 111320);
-assert.equal(offRing.length, 5);
-assert.deepEqual(offRing[4], offRing[0]);
-assert.ok(offRing[0].lat > 0 && offRing[0].lon > 0);
-assert.ok(offRing[2].lat < 1 && offRing[2].lon < 1);
-// Grouping: two identical lines (either direction) offset opposite
-// ways, 8 m step -> -4 m / +4 m; three identical lines leave the
-// middle one exactly on the feature; no duplicates returns the input.
-const dupA = { kind: "added", pts: offLine };
-const dupB = { kind: "removed", pts: offLine.slice().reverse() };
-const sep2 = separateOverlappingDrawables([dupA, dupB]);
-assert.ok(Math.abs(sep2[0].pts[0].lat - (-4 / 111320)) < 1e-9);
-assert.ok(Math.abs(sep2[1].pts[0].lat - (4 / 111320)) < 1e-9);
-assert.equal(sep2[0].kind, "added");
-assert.equal(sep2[1].kind, "removed");
-const dupC = { kind: "unchanged", pts: offLine };
-const sep3 = separateOverlappingDrawables([dupA, dupB, dupC]);
-assert.equal(sep3[1], dupB, "middle line of an odd group stays put");
-assert.ok(sep3[0].pts[0].lat < 0 && sep3[2].pts[0].lat > 0);
-const single = [{ kind: "added", pts: offLine }];
-assert.equal(separateOverlappingDrawables(single), single);
-// Connectors and single points never join a group, and a drawable
-// with a missing coordinate is skipped instead of crashing.
-const conn = { kind: "connector", pts: offLine };
-const connIn = [dupA, conn];
-assert.equal(separateOverlappingDrawables(connIn), connIn, "a line plus a connector over it is not a duplicate group");
-const badPts = { kind: "added", pts: [{ lat: 0, lon: 0 }, { lat: undefined, lon: 1 }] };
-const badIn = [badPts, { ...badPts }];
-assert.equal(separateOverlappingDrawables(badIn), badIn, "missing coordinates skip grouping, no crash");
+// --- overlapping lines: style-only casing, per segment ---
+// Geometry is never moved: coincident lines nest by stroke width
+// (first drawn = bottom = widest), so each shows as a stripe and
+// stays clickable. Two identical 3-point lines split into their two
+// segments each, bottom weight 7, top weight 3, points untouched.
+const stPts = [{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 0, lon: 2 }];
+const stA = { kind: "added", pts: stPts };
+const stB = { kind: "removed", pts: stPts.slice().reverse() };
+const st2 = styleOverlappingDrawables([stA, stB]);
+assert.equal(st2.length, 4);
+assert.deepEqual(st2[0].pts, [stPts[0], stPts[1]]);
+assert.deepEqual(st2[1].pts, [stPts[1], stPts[2]]);
+assert.equal(st2[0].weight, 7);
+assert.equal(st2[1].weight, 7);
+assert.equal(st2[2].weight, 3);
+assert.equal(st2[3].weight, 3);
+assert.equal(st2[0].kind, "added");
+assert.equal(st2[2].kind, "removed");
+// Partial overlap, different lengths: the long line splits at the
+// shared stretch — only the shared sub-segment nests, the rest draws
+// at the normal weight, and the short line stays one piece.
+const stLong = { kind: "unchanged", pts: [{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 0, lon: 2 }, { lat: 0, lon: 3 }] };
+const stShort = { kind: "added", pts: [{ lat: 0, lon: 1 }, { lat: 0, lon: 2 }] };
+const stPart = styleOverlappingDrawables([stLong, stShort]);
+assert.equal(stPart.length, 4);
+assert.equal(stPart[0].weight, 3); // unshared head
+assert.equal(stPart[1].weight, 7); // shared stretch, bottom
+assert.equal(stPart[2].weight, 3); // unshared tail
+assert.equal(stPart[3].weight, 3); // short line on top
+assert.deepEqual(stPart[1].pts, [{ lat: 0, lon: 1 }, { lat: 0, lon: 2 }]);
+assert.deepEqual(stPart[3].pts, [{ lat: 0, lon: 1 }, { lat: 0, lon: 2 }]);
+// Three identical lines nest 11 / 7 / 3.
+const stC = { kind: "kept", pts: stPts };
+const st3 = styleOverlappingDrawables([stA, stB, stC]);
+assert.deepEqual(st3.map((d) => d.weight), [11, 11, 7, 7, 3, 3]);
+// No overlap returns the input; connectors, single points and
+// drawables with a missing coordinate are left alone, no crash.
+const stSingle = [{ kind: "added", pts: stPts }];
+assert.equal(styleOverlappingDrawables(stSingle), stSingle);
+const stConn = [{ kind: "connector", pts: stPts }, stA];
+assert.equal(styleOverlappingDrawables(stConn), stConn);
+const stPoint = [{ kind: "added", pts: [{ lat: 0, lon: 0 }] }];
+assert.equal(styleOverlappingDrawables(stPoint), stPoint);
+const stBad = { kind: "added", pts: [{ lat: 0, lon: 0 }, { lat: undefined, lon: 1 }] };
+const stBadIn = [stBad, { ...stBad }];
+assert.equal(styleOverlappingDrawables(stBadIn), stBadIn);
+// Identical closed rings stay whole (fill intact) and nest by
+// outline weight.
+const stRing = [{ lat: 0, lon: 0 }, { lat: 0, lon: 1 }, { lat: 1, lon: 1 }, { lat: 1, lon: 0 }, { lat: 0, lon: 0 }];
+const stRings = styleOverlappingDrawables([{ kind: "added", pts: stRing }, { kind: "removed", pts: stRing }]);
+assert.equal(stRings.length, 2);
+assert.equal(stRings[0].pts.length, 5);
+assert.equal(stRings[0].weight, 7);
+assert.equal(stRings[1].weight, 3);
 
 console.log("All editor logic tests passed.");

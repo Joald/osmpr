@@ -144,12 +144,17 @@ present, `d` wins.
   expanded if its group was collapsed, then briefly highlighted.
   The popup and hover tooltip use the page dark theme. A changed
   way is drawn segment by segment (consecutive node pairs
-  matched as a multiset): unchanged segments grey, removed
-  segments red, added segments green — never the whole new way
-  in green on top of the whole old way in red. Lines that coincide
-  exactly (a way both added and removed, the same member way drawn
-  by two relations) are offset sideways by a few metres, so each
-  stays visible and clickable instead of hiding under the top one.
+  matched as a multiset): segments shared by the old and new shape
+  of a changed way are orange ("kept"), removed segments red,
+  added segments green — never the whole new way in green on top
+  of the whole old way in red; a way that did not change at all
+  stays grey. Lines that coincide exactly (a way both added and
+  removed, the same member way drawn by two relations) keep their
+  exact geometry and nest like casings — the bottom line is
+  widest, each line above it narrower — so every line shows as a
+  stripe and stays visible and clickable instead of hiding under
+  the top one. Two lines of different lengths split at the shared
+  stretch, so every sub-segment shows exactly the lines covering it.
 - Diff views show 3 lines of context around each change; the
   rest of an unchanged run collapses behind one expander, and
   expanding it reveals the lines and removes the expander button.
