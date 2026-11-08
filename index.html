@@ -213,7 +213,7 @@
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
     <li>View an existing changeset the same way: <code>?changeset=1234567</code>, or paste an id/URL in the page header. After a successful upload the page switches to the new changeset's view automatically.</li>
-    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Versions run oldest to newest along a timeline (version above, date below); click a version to see its changes and map. The map draws the version against the previous one (gray unchanged, green added, red removed). Arrow keys ←/→ or -/= switch entries without reloading the map. For relations, Show all member changes reveals geometry changes to member ways and node members between versions (including ways nested in sub-relations), with + to expand one gap at a time.</li>
+    <li>View an object's history across changesets: <code>?history=relation:2402490</code>, or paste <code>type:id</code> (e.g. <code>relation:2402490</code>) or an OSM object URL in the page header and click Go. Versions run oldest to newest along a timeline (version above, date below); click a version to see its changes and map. The map draws the version against the previous one (gray unchanged, green added, red removed). Arrow keys ←/→ or -/= switch entries without reloading the map. For relations, Show all member changes reveals geometry changes to member ways and node members between versions (including ways nested in sub-relations), with + to expand one gap at a time. The timeline shows first; member changes load in the background, and the toggle stays disabled with its progress until they arrive.</li>
   </ul>
   <p>Simple format for a single relation (no JSON): <code>?rel=175342&amp;v=217&amp;add=rel:51805:subarea&amp;comment=…</code> — <code>add</code>/<code>del</code> may repeat; member spec is <code>type:id[:role]</code> with type <code>n</code>/<code>w</code>/<code>r</code> or <code>node</code>/<code>way</code>/<code>relation</code>. If both <code>d</code> and <code>rel</code> are present, <code>d</code> wins.</p>
   <div class="row"><button id="helpCloseBtn" type="button">Close</button></div>
@@ -376,10 +376,6 @@ function historyChangeSummary(prev, cur) {
   else if (cur.type === "way") geometryChanged = JSON.stringify(prev.nodeRefs) !== JSON.stringify(cur.nodeRefs);
   return { kind: "changed", addedMembers: dm.added.length, removedMembers: dm.removed.length, tagChanges: dt.length, geometryChanged };
 }
-const MEMBER_CHANGE_MAX_WAYS = 200;
-const MEMBER_CHANGE_MAX_NODES = 1000;
-const MEMBER_CHANGE_MAX_RELS = 25;
-const MEMBER_CHANGE_MAX_DEPTH = 3;
 function transitiveClosureMembers(version, relHist) {
   // Ways and node members reachable from one relation version, recursing
   // into member relations (transitive relational containment). Returns
@@ -387,31 +383,32 @@ function transitiveClosureMembers(version, relHist) {
   // of relation ids from the parent down to the relation directly
   // holding the object (empty for direct members). A sub-relation
   // resolves to its version as of the parent version's changeset.
-  // Cycles and nesting beyond MEMBER_CHANGE_MAX_DEPTH stop the walk.
+  // Recursion is unbounded in depth; cycles stop at seenRels (each
+  // relation is walked once per version), so the walk always terminates.
   const ways = new Map(), nodes = new Map();
   const seenRels = new Set();
-  const walk = (members, via, depth) => {
+  const walk = (members, via) => {
     for (const m of members || []) {
       if (!m || !Number.isFinite(m.ref) || m.ref < 0) continue;
       if (m.type === "way") { if (!ways.has(m.ref)) ways.set(m.ref, via); }
       else if (m.type === "node") { if (!nodes.has(m.ref)) nodes.set(m.ref, via); }
       else if (m.type === "relation") {
-        if (depth >= MEMBER_CHANGE_MAX_DEPTH || seenRels.has(m.ref)) continue;
+        if (seenRels.has(m.ref)) continue;
         seenRels.add(m.ref);
         const sub = pickVersionAtChangeset((relHist || new Map()).get(m.ref), version.changeset, true);
-        if (sub) walk(sub.members, [...via, m.ref], depth + 1);
+        if (sub) walk(sub.members, [...via, m.ref]);
       }
     }
   };
-  walk(version.members, [], 0);
+  walk(version.members, []);
   return { ways, nodes };
 }
 function computeMemberGeometryEvents(versions, wayHist, nodeHist, relHist) {
-  // Pure geometry comparison for relation history: which member ways
-  // and node members changed shape between consecutive relation
-  // versions, and in which changeset. Coverage is the transitive
-  // relational closure (relation -> member ways/nodes, recursing into
-  // member relations), so a change counts only if it touched the
+  // Pure geometry comparison for relation history: every geometry change
+  // to a member way or node member, each with its exact changeset.
+  // Coverage is the full transitive relational closure over the whole
+  // history (relation -> member ways/nodes, recursing into member
+  // relations, all versions), so a change counts only if it touched the
   // relation's own geometry — never merely because it shares a
   // changeset. versions are normalized history elements (ascending);
   // wayHist/nodeHist/relHist map id -> raw history.json elements
@@ -419,55 +416,91 @@ function computeMemberGeometryEvents(versions, wayHist, nodeHist, relHist) {
   // versionDetails: Map<vi, details[]>, partial }.
   // An event is {objType: "way"|"node", obj, kind: "refs"|"moved",
   // detail, changeset, timestamp, gap, via, oldPos?, newPos?} (oldPos /
-  // newPos only for node moves, for the event map). Events in the same
+  // newPos only for node moves, for the event map). A change lands in
+  // the gap whose bounds bracket its changeset (prev.changeset <
+  // changeset <= cur.changeset); changes at or before the first version
+  // or after the last have no gap and are not shown. Events in the same
   // changeset as the newer version attach to that version
-  // (versionDetails); the rest are standalone gap events.
-  // Refs changes are exact; node moves need complete node histories on
-  // both sides, otherwise the way is skipped for that gap (no false
-  // positives). Ways/nodes/relations missing from the histories are
-  // skipped.
+  // (versionDetails); the rest are standalone gap events. A way that
+  // changes twice between the same two relation versions produces two
+  // events, one per changeset — nothing is folded to the latest move.
+  // Refs changes are exact; node moves need the node's history, and a
+  // move whose position cannot be resolved on either side is skipped
+  // (no false positives). Ways/nodes/relations missing from the
+  // histories are skipped. partial is always false here (no truncation
+  // in the pure comparison); the fetcher sets it when a history fetch
+  // fails.
   const gaps = new Map(), versionDetails = new Map();
-  let partial = false;
   const closures = (versions || []).map((v) => transitiveClosureMembers(v, relHist || new Map()));
-  const seenWays = [], seenNodeMembers = [];
+  const unionWays = [], unionNodes = [];
   for (const c of closures) {
-    for (const wid of c.ways.keys()) if (!seenWays.includes(wid)) seenWays.push(wid);
-    for (const nid of c.nodes.keys()) if (!seenNodeMembers.includes(nid)) seenNodeMembers.push(nid);
+    for (const wid of c.ways.keys()) if (!unionWays.includes(wid)) unionWays.push(wid);
+    for (const nid of c.nodes.keys()) if (!unionNodes.includes(nid)) unionNodes.push(nid);
   }
-  const ways = seenWays.slice(0, MEMBER_CHANGE_MAX_WAYS);
-  if (seenWays.length > ways.length) partial = true;
-  const nodeIds = [];
-  // Node members first: they are few and directly held by the relation,
-  // so they must never starve behind the (much larger) way-node list
-  // when the node cap truncates.
-  for (const nid of seenNodeMembers) if (!nodeIds.includes(nid)) nodeIds.push(nid);
-  for (const wid of ways) {
-    for (const e of wayHist.get(wid) || []) {
-      for (const nid of e.nodes || []) if (!nodeIds.includes(nid)) nodeIds.push(nid);
-    }
-  }
-  const nodes = nodeIds.slice(0, MEMBER_CHANGE_MAX_NODES);
-  if (nodeIds.length > nodes.length) partial = true;
-  const nodeSet = new Set(nodes);
+  const posOf = (nv) => (!nv || nv.visible === false || nv.lat == null || nv.lon == null) ? null : { lat: nv.lat, lon: nv.lon };
   const geomAt = (wid, boundCs) => {
     const wv = pickVersionAtChangeset(wayHist.get(wid), boundCs, true);
     if (!wv || !Array.isArray(wv.nodes)) return null;
     const refs = wv.nodes;
-    const coords = new Map();
-    let complete = true;
+    const coords = new Map(), unknown = new Set();
     for (const nid of refs) {
-      if (!nodeSet.has(nid) || !nodeHist.has(nid)) { complete = false; break; }
+      if (!nodeHist.has(nid)) { unknown.add(nid); continue; }
       const nv = pickVersionAtChangeset(nodeHist.get(nid), boundCs, true);
       if (!nv) { coords.set(nid, null); continue; }
-      coords.set(nid, (nv.visible === false || nv.lat == null || nv.lon == null) ? null : { lat: nv.lat, lon: nv.lon });
+      coords.set(nid, posOf(nv));
     }
-    return { refs, coords, complete, wv };
+    return { refs, coords, unknown, wv };
   };
-  const nodePosAt = (nid, boundCs) => {
-    const nv = pickVersionAtChangeset(nodeHist.get(nid), boundCs, true);
-    if (!nv) return null;
-    return (nv.visible === false || nv.lat == null || nv.lon == null) ? null : { lat: nv.lat, lon: nv.lon };
+  // Geometry difference between two states: null when equal, else
+  // {refsChanged, moved:[node ids]}. A node whose position is unknown
+  // on either side is ignored (no false positives on missing history);
+  // a deleted node (null coords) counts as a real position.
+  const geomDiff = (a, b) => {
+    if (JSON.stringify(a.refs) !== JSON.stringify(b.refs)) return { refsChanged: true, moved: [] };
+    const moved = [];
+    for (const nid of a.refs) {
+      if (a.unknown.has(nid) || b.unknown.has(nid)) continue;
+      if (JSON.stringify(a.coords.get(nid)) !== JSON.stringify(b.coords.get(nid))) moved.push(nid);
+    }
+    return moved.length ? { refsChanged: false, moved } : null;
   };
+  // Candidate changesets per way, over the whole history: every way
+  // version (refs/tag changes; tag-only ones are filtered out by the
+  // geometry comparison) plus every changeset where a node of the way
+  // moved. Sorted ascending; the per-gap chain compares consecutive
+  // states, so each real change gets its own event at its own
+  // changeset.
+  const wayCandidates = new Map();
+  for (const wid of unionWays) {
+    const cand = new Set();
+    const wh = wayHist.get(wid) || [];
+    for (const wv of wh) if (Number.isFinite(wv.changeset)) cand.add(wv.changeset);
+    const refNodes = new Set();
+    for (const wv of wh) for (const nid of wv.nodes || []) refNodes.add(nid);
+    for (const nid of refNodes) {
+      const nh = nodeHist.get(nid) || [];
+      for (let k = 1; k < nh.length; k++) {
+        if (JSON.stringify(posOf(nh[k])) !== JSON.stringify(posOf(nh[k - 1]))) cand.add(nh[k].changeset);
+      }
+    }
+    wayCandidates.set(wid, [...cand].sort((a, b) => a - b));
+  }
+  // Moves per node member, over the whole history: each version whose
+  // position differs from the previous version, with before/after
+  // positions for the event map. Deleted/restored positions (null) are
+  // skipped, as before.
+  const nodeMoves = new Map();
+  for (const nid of unionNodes) {
+    const moves = [];
+    const nh = nodeHist.get(nid) || [];
+    for (let k = 1; k < nh.length; k++) {
+      const a = posOf(nh[k - 1]), b = posOf(nh[k]);
+      if (!a || !b) continue;
+      if (a.lat === b.lat && a.lon === b.lon) continue;
+      moves.push({ changeset: nh[k].changeset, timestamp: nh[k].timestamp || "", oldPos: a, newPos: b });
+    }
+    nodeMoves.set(nid, moves);
+  }
   for (let i = 1; i < (versions || []).length; i++) {
     const prev = versions[i - 1], cur = versions[i];
     if (!Number.isFinite(prev.changeset) || !Number.isFinite(cur.changeset)) continue;
@@ -483,41 +516,41 @@ function computeMemberGeometryEvents(versions, wayHist, nodeHist, relHist) {
     };
     for (const wid of prevC.ways.keys()) {
       if (!curC.ways.has(wid)) continue;
-      if (!ways.includes(wid)) continue;
-      const a = geomAt(wid, prev.changeset), b = geomAt(wid, cur.changeset);
-      if (!a || !b) continue;
+      if (!wayHist.has(wid)) continue;
       const via = curC.ways.get(wid) || [];
-      if (JSON.stringify(a.refs) === JSON.stringify(b.refs)) {
-        if (!a.complete || !b.complete) continue;
-        const moved = [];
-        for (const nid of a.refs) {
-          if (JSON.stringify(a.coords.get(nid)) !== JSON.stringify(b.coords.get(nid))) moved.push(nid);
+      let gPrev = geomAt(wid, prev.changeset);
+      if (!gPrev) continue;
+      for (const C of wayCandidates.get(wid) || []) {
+        if (C <= prev.changeset || C > cur.changeset) continue;
+        const gC = geomAt(wid, C);
+        if (!gC) continue;
+        const d = geomDiff(gPrev, gC);
+        if (!d) { gPrev = gC; continue; }
+        if (d.refsChanged) {
+          place({ objType: "way", obj: wid, way: wid, kind: "refs", detail: "nodes " + gPrev.refs.length + " → " + gC.refs.length + " (way v" + gPrev.wv.version + " → v" + gC.wv.version + ")", changeset: C, timestamp: gC.wv.timestamp || "", gap: i - 1, via });
+        } else {
+          let ts = "";
+          for (const nid of d.moved) {
+            const nv = pickVersionAtChangeset(nodeHist.get(nid), C, true);
+            if (nv && nv.changeset === C) { ts = nv.timestamp || ""; break; }
+          }
+          place({ objType: "way", obj: wid, way: wid, kind: "moved", detail: "node positions moved (same refs)", changeset: C, timestamp: ts, gap: i - 1, via });
         }
-        if (!moved.length) continue;
-        let cs = -1, ts = "";
-        for (const nid of moved) {
-          const nv = pickVersionAtChangeset(nodeHist.get(nid), cur.changeset, true);
-          if (nv && Number.isFinite(nv.changeset) && nv.changeset > cs) { cs = nv.changeset; ts = nv.timestamp || ""; }
-        }
-        if (cs < 0) continue;
-        place({ objType: "way", obj: wid, way: wid, kind: "moved", detail: "node positions moved (same refs)", changeset: cs, timestamp: ts, gap: i - 1, via });
-      } else {
-        place({ objType: "way", obj: wid, way: wid, kind: "refs", detail: "nodes " + a.refs.length + " → " + b.refs.length + " (way v" + a.wv.version + " → v" + b.wv.version + ")", changeset: b.wv.changeset, timestamp: b.wv.timestamp || "", gap: i - 1, via });
+        gPrev = gC;
       }
     }
     for (const nid of prevC.nodes.keys()) {
       if (!curC.nodes.has(nid)) continue;
-      if (!nodeSet.has(nid) || !nodeHist.has(nid)) continue;
-      const a = nodePosAt(nid, prev.changeset), b = nodePosAt(nid, cur.changeset);
-      if (!a || !b) continue;
-      if (a.lat === b.lat && a.lon === b.lon) continue;
-      const bv = pickVersionAtChangeset(nodeHist.get(nid), cur.changeset, true);
-      if (!bv || !Number.isFinite(bv.changeset)) continue;
-      place({ objType: "node", obj: nid, kind: "moved", detail: "node position moved", changeset: bv.changeset, timestamp: bv.timestamp || "", gap: i - 1, via: curC.nodes.get(nid) || [], oldPos: a, newPos: b });
+      if (!nodeHist.has(nid)) continue;
+      const via = curC.nodes.get(nid) || [];
+      for (const m of nodeMoves.get(nid) || []) {
+        if (m.changeset <= prev.changeset || m.changeset > cur.changeset) continue;
+        place({ objType: "node", obj: nid, kind: "moved", detail: "node position moved", changeset: m.changeset, timestamp: m.timestamp, gap: i - 1, via, oldPos: m.oldPos, newPos: m.newPos });
+      }
     }
   }
   for (const list of gaps.values()) list.sort((x, y) => (x.changeset - y.changeset) || (x.objType === y.objType ? x.obj - y.obj : (x.objType < y.objType ? -1 : 1)));
-  return { gaps, versionDetails, partial };
+  return { gaps, versionDetails, partial: false };
 }
 function applyOps(current, ops) {
   const notes = [];
@@ -1049,9 +1082,10 @@ if (typeof document !== "undefined") {
     if (!res.ok) throw new Error("History fetch failed (" + res.status + ") for " + type + " " + id + ".");
     return (await res.json()).elements || [];
   }
-  async function fetchAllChunked(items, fn, size) {
+  async function fetchAllChunked(items, fn, size, onChunk) {
     // Parallel fetches in chunks; a failed item resolves to null instead
-    // of failing the whole batch.
+    // of failing the whole batch. onChunk(done, total), when given, is
+    // called after each chunk so a long fetch can show progress.
     const out = new Map();
     for (let i = 0; i < items.length; i += size) {
       const chunk = items.slice(i, i + size);
@@ -1059,14 +1093,23 @@ if (typeof document !== "undefined") {
         try { return [it, await fn(it)]; } catch (e) { return [it, null]; }
       }));
       for (const [it, res] of results) if (res) out.set(it, res);
+      if (onChunk) onChunk(Math.min(i + size, items.length), items.length);
     }
     return out;
   }
-  async function computeRelationMemberChanges(versions) {
-    // Fetch sub-relation histories level by level (transitive closure),
-    // then each involved way history and node history once (parallel
-    // chunks), then run the pure geometry comparison.
-    let relTruncated = false;
+  async function computeRelationMemberChanges(versions, onProgress) {
+    // Gather the full history first, then compare: every version of the
+    // relation, every historical member (union over all versions),
+    // recursively the same for every member relation (each relation
+    // fetched once; cycles stop at relHist), then every involved way
+    // history and node history once (parallel chunks). No caps on the
+    // number of ways, nodes or relations — the result is the complete
+    // history, and partial is set only when a history fetch actually
+    // fails (those histories are missing from the comparison).
+    // onProgress({stage, done, total}), when given, reports the fetch
+    // stage so the UI can show the load is still in progress; the
+    // relations stage has no known total (recursive discovery).
+    let fetchFailed = false;
     const relHist = new Map();
     let frontier = [];
     for (const v of versions || []) {
@@ -1074,12 +1117,10 @@ if (typeof document !== "undefined") {
         if (m.type === "relation" && Number.isFinite(m.ref) && m.ref >= 0 && !frontier.includes(m.ref)) frontier.push(m.ref);
       }
     }
-    for (let depth = 0; depth < MEMBER_CHANGE_MAX_DEPTH && frontier.length; depth++) {
-      const room = MEMBER_CHANGE_MAX_RELS - relHist.size;
-      if (room <= 0) { relTruncated = true; break; }
-      const batch = frontier.slice(0, room);
-      if (frontier.length > batch.length) relTruncated = true;
-      const got = await fetchAllChunked(batch, (rid) => fetchHistoryElements("relation", rid), 10);
+    while (frontier.length) {
+      const batch = frontier;
+      const got = await fetchAllChunked(batch, (rid) => fetchHistoryElements("relation", rid), 10, onProgress ? (done) => onProgress({ stage: "relations", done: relHist.size + done, total: null }) : null);
+      if (got.size < batch.length) fetchFailed = true;
       for (const [k, v] of got) relHist.set(k, v);
       frontier = [];
       for (const els of got.values()) {
@@ -1096,22 +1137,20 @@ if (typeof document !== "undefined") {
       for (const wid of c.ways.keys()) if (!seenWays.includes(wid)) seenWays.push(wid);
       for (const nid of c.nodes.keys()) if (!seenNodeMembers.includes(nid)) seenNodeMembers.push(nid);
     }
-    const ways = seenWays.slice(0, MEMBER_CHANGE_MAX_WAYS);
-    const wayHist = await fetchAllChunked(ways, (wid) => fetchHistoryElements("way", wid), 10);
+    const wayHist = await fetchAllChunked(seenWays, (wid) => fetchHistoryElements("way", wid), 10, onProgress ? (done, total) => onProgress({ stage: "ways", done, total }) : null);
+    if (wayHist.size < seenWays.length) fetchFailed = true;
     const nodeIds = [];
-    // Node members first: they are few and directly held by the relation,
-    // so they must never starve behind the (much larger) way-node list
-    // when the node cap truncates.
+    // Node members first: they are few and directly held by the relation.
     for (const nid of seenNodeMembers) if (!nodeIds.includes(nid)) nodeIds.push(nid);
-    for (const wid of ways) {
+    for (const wid of seenWays) {
       for (const e of wayHist.get(wid) || []) {
         for (const nid of e.nodes || []) if (!nodeIds.includes(nid)) nodeIds.push(nid);
       }
     }
-    const nodes = nodeIds.slice(0, MEMBER_CHANGE_MAX_NODES);
-    const nodeHist = await fetchAllChunked(nodes, (nid) => fetchHistoryElements("node", nid), 10);
+    const nodeHist = await fetchAllChunked(nodeIds, (nid) => fetchHistoryElements("node", nid), 10, onProgress ? (done, total) => onProgress({ stage: "nodes", done, total }) : null);
+    if (nodeHist.size < nodeIds.length) fetchFailed = true;
     const res = computeMemberGeometryEvents(versions, wayHist, nodeHist, relHist);
-    if (relTruncated || seenWays.length > ways.length || nodeIds.length > nodes.length) res.partial = true;
+    if (fetchFailed) res.partial = true;
     return res;
   }
   function boundOk(cs, bound) {
@@ -2391,6 +2430,17 @@ if (typeof document !== "undefined") {
     let versionMemberDetails = new Map();
     let memberFailed = false;
     let memberPartial = false;
+    let memberProgress = null; // {stage, done, total} while the background fetch runs
+    // Label for the toggle button while member changes are still
+    // loading: the main history (timeline, map, version detail) renders
+    // immediately, and this button stays greyed out with its progress
+    // until the background computation finishes.
+    const memberProgressLabel = (p) => {
+      if (!p) return "Loading member changes…";
+      if (p.stage === "relations") return "Loading member changes… (" + p.done + " relations)";
+      if (p.total) return "Loading member changes… " + p.done.toLocaleString() + " / " + p.total.toLocaleString() + " " + p.stage;
+      return "Loading member changes…";
+    };
     let expandedGaps = new Set();
     let scrolledToEnd = false;
     let lastScroller = null, lastTrack = null;
@@ -2507,11 +2557,11 @@ if (typeof document !== "undefined") {
       toggleRowWrap.innerHTML = "";
       if (type === "relation") {
         const row = el("div", null, "row");
-        const toggleBtn = el("button", expandedGaps.size > 0 ? "Hide all member changes" : "Show all member changes", "secondary");
+        const toggleBtn = el("button", memberGaps === null ? memberProgressLabel(memberProgress) : (expandedGaps.size > 0 ? "Hide all member changes" : "Show all member changes"), "secondary");
         toggleBtn.type = "button";
         toggleBtn.disabled = memberGaps === null;
         if (memberGaps === null) toggleBtn.title = memberFailed ? "Member changes unavailable" : "Computing member changes…";
-        else if (memberPartial) toggleBtn.title = "Member changes partially computed (capped at 200 ways / 1000 nodes / 25 relations)";
+        else if (memberPartial) toggleBtn.title = "Member changes partially computed (some histories could not be loaded)";
         toggleBtn.addEventListener("click", () => {
           if (expandedGaps.size > 0) expandedGaps.clear();
           else for (const k of memberGaps.keys()) expandedGaps.add(k);
@@ -2727,8 +2777,14 @@ if (typeof document !== "undefined") {
     if (type === "relation") {
       // Member geometry changes resolve in the background: the
       // timeline and map already work without them. The toggle button
-      // stays disabled until the computation finishes (or fails).
-      computeRelationMemberChanges(versions).then((res) => {
+      // stays disabled until the computation finishes (or fails), and
+      // its label shows the fetch progress in place — the timeline
+      // itself is never rebuilt for a progress update.
+      computeRelationMemberChanges(versions, (p) => {
+        memberProgress = p;
+        const btn = toggleRowWrap.querySelector("button");
+        if (btn && memberGaps === null) btn.textContent = memberProgressLabel(p);
+      }).then((res) => {
         memberGaps = res.gaps;
         versionMemberDetails = res.versionDetails;
         memberPartial = res.partial;

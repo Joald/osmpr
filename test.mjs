@@ -305,15 +305,24 @@ assert.equal(gap2.find((e) => e.way === 28533849).changeset, 60117010);
 // Tag-only way bump (999, same refs and coords) produces no event.
 assert.ok(![...mge.gaps.values()].flat().some((e) => e.way === 999));
 assert.ok(![...mge.versionDetails.values()].flat().some((d) => d.way === 999));
-// Cap: 201 member ways -> partial, no crash.
+// No caps: 201 member ways (past the old 200-way cap) are all covered.
 const manyMembers = Array.from({ length: 201 }, (_, i) => ({ type: "way", ref: 1000 + i, role: "outer" }));
+const many201WayHists = new Map();
+for (let i = 0; i < 201; i++) {
+  many201WayHists.set(1000 + i, wayHist(1000 + i, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [A, B] },
+    { cs: 150, ts: "2016-01-15T00:00:00Z", nodes: [A, B, C] },
+  ]));
+}
 const manyVersions = [
-  { type: "relation", id: 1, version: 1, changeset: 100, timestamp: "2008-11-21T00:00:00Z", user: "x", visible: true, tags: {}, members: manyMembers },
-  { type: "relation", id: 1, version: 2, changeset: 200, timestamp: "2008-11-22T00:00:00Z", user: "x", visible: true, tags: {}, members: manyMembers },
+  { type: "relation", id: 1, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: manyMembers },
+  { type: "relation", id: 1, version: 2, changeset: 200, timestamp: "2016-02-01T00:00:00Z", user: "x", visible: true, tags: {}, members: manyMembers },
 ];
-const capRes = computeMemberGeometryEvents(manyVersions, new Map(), new Map());
-assert.equal(capRes.partial, true);
-assert.equal(capRes.gaps.size, 0);
+const capRes = computeMemberGeometryEvents(manyVersions, many201WayHists, nodeHists);
+assert.equal(capRes.partial, false);
+assert.equal((capRes.gaps.get(0) || []).length, 201);
+assert.ok((capRes.gaps.get(0) || []).some((e) => e.way === 1200), "the 201st way is covered too");
+assert.ok((capRes.gaps.get(0) || []).every((e) => e.changeset === 150 && e.kind === "refs"));
 
 // --- transitive closure: node members + nested sub-relation ways ---
 function relHist(id, vs) {
@@ -407,7 +416,8 @@ const cyclicVersions = [
 const cc = transitiveClosureMembers(cyclicVersions[0], cyclicRelHists);
 assert.deepEqual(cc.ways.get(7003), [900101]);
 
-// Nesting depth: ways 3 relations down are included, 4 down are not.
+// Nesting depth: recursion is unbounded — a way 4 relations down is
+// included too (cycles still terminate via the seen-set).
 const deepRelHists = new Map([
   [910001, relHist(910001, [{ cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "relation", ref: 910002, role: "" }] }])],
   [910002, relHist(910002, [{ cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "relation", ref: 910003, role: "" }] }])],
@@ -419,10 +429,10 @@ const deepVersions = [
 ];
 const dc = transitiveClosureMembers(deepVersions[0], deepRelHists);
 assert.deepEqual(dc.ways.get(7005), [910001, 910002, 910003]);
-assert.ok(!dc.ways.has(7004), "4 levels of nesting are beyond the depth cap");
+assert.deepEqual(dc.ways.get(7004), [910001, 910002, 910003, 910004]);
 
-// Node members are fetched first: a node member must still produce its
-// event when the way nodes alone already exceed the 1000-node cap.
+// No caps: a node member still produces its event when the way has
+// 1001 nodes (past the old 1000-node cap).
 const manyNodes = [];
 const manyNodeHists = new Map();
 for (let n = 0; n < 1001; n++) {
@@ -442,10 +452,78 @@ const capNodeVersions = [
   { type: "relation", id: 900005, version: 2, changeset: 200, timestamp: "2016-02-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "node", ref: 8001, role: "admin_centre" }] },
 ];
 const cnr = computeMemberGeometryEvents(capNodeVersions, manyWayHists, manyNodeHists);
-assert.equal(cnr.partial, true);
+assert.equal(cnr.partial, false);
 assert.equal((cnr.gaps.get(0) || []).length, 1);
 assert.equal(cnr.gaps.get(0)[0].objType, "node");
 assert.equal(cnr.gaps.get(0)[0].obj, 8001);
 assert.equal(cnr.gaps.get(0)[0].changeset, 150);
+
+// --- exact per-change attribution (full-history model) ---
+// One event per actual change, at its exact changeset: a way that
+// changes twice between the same two relation versions produces two
+// events (never folded to the latest move), and a refs change and a
+// node move in the same changeset are one event.
+const EA1 = 700000101, EA2 = 700000102, EA3 = 700000103;
+const EB1 = 700000104, EB2 = 700000105;
+const EC1 = 700000106, EC2 = 700000107, EC3 = 700000108;
+const ED1 = 700000109, ED2 = 700000110, ED3 = 700000111;
+const EN2 = 700000112;
+const exactNodeHists = new Map([
+  [EA1, nodeHist(EA1, 63.84, 20.18, [])],
+  [EA2, nodeHist(EA2, 63.841, 20.181, [])],
+  [EA3, nodeHist(EA3, 63.842, 20.182, [])],
+  [EB1, nodeHist(EB1, 63.84, 20.18, [{ cs: 150, ts: "2016-01-15T00:00:00Z", lat: 63.841, lon: 20.181 }, { cs: 250, ts: "2016-02-15T00:00:00Z", lat: 63.842, lon: 20.182 }])],
+  [EB2, nodeHist(EB2, 63.85, 20.19, [])],
+  [EC1, nodeHist(EC1, 63.84, 20.18, [])],
+  [EC2, nodeHist(EC2, 63.841, 20.181, [{ cs: 200, ts: "2016-02-01T00:00:00Z", lat: 63.842, lon: 20.182 }])],
+  [EC3, nodeHist(EC3, 63.842, 20.182, [])],
+  [ED1, nodeHist(ED1, 63.84, 20.18, [])],
+  [ED2, nodeHist(ED2, 63.841, 20.181, [])],
+  [ED3, nodeHist(ED3, 63.842, 20.182, [])],
+  [EN2, nodeHist(EN2, 63.84, 20.18, [{ cs: 150, ts: "2016-01-15T00:00:00Z", lat: 63.841, lon: 20.181 }, { cs: 250, ts: "2016-02-15T00:00:00Z", lat: 63.842, lon: 20.182 }, { cs: 350, ts: "2016-03-15T00:00:00Z", lat: 63.843, lon: 20.183 }])],
+]);
+const exactWayHists = new Map([
+  [7101, wayHist(7101, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [EA1, EA2] },
+    { cs: 150, ts: "2016-01-15T00:00:00Z", nodes: [EA1, EA2, EA3] },
+    { cs: 250, ts: "2016-02-15T00:00:00Z", nodes: [EA1, EA2] },
+  ])],
+  [7102, wayHist(7102, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [EB1, EB2] },
+  ])],
+  [7103, wayHist(7103, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [EC1, EC2] },
+    { cs: 200, ts: "2016-02-01T00:00:00Z", nodes: [EC1, EC2, EC3] },
+  ])],
+  [7104, wayHist(7104, [
+    { cs: 50, ts: "2015-12-01T00:00:00Z", nodes: [ED1, ED2] },
+    { cs: 400, ts: "2016-04-01T00:00:00Z", nodes: [ED1, ED2, ED3] },
+  ])],
+]);
+const exactVersions = [
+  { type: "relation", id: 900010, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 7101, role: "" }, { type: "way", ref: 7102, role: "" }, { type: "way", ref: 7103, role: "" }, { type: "way", ref: 7104, role: "" }, { type: "node", ref: EN2, role: "admin_centre" }] },
+  { type: "relation", id: 900010, version: 2, changeset: 300, timestamp: "2016-03-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 7101, role: "" }, { type: "way", ref: 7102, role: "" }, { type: "way", ref: 7103, role: "" }, { type: "way", ref: 7104, role: "" }, { type: "node", ref: EN2, role: "admin_centre" }] },
+];
+const ex = computeMemberGeometryEvents(exactVersions, exactWayHists, exactNodeHists);
+assert.equal(ex.partial, false);
+const exGap = ex.gaps.get(0) || [];
+assert.equal(exGap.length, 7);
+// Way 7101: refs changed twice in the gap -> two events, exact changesets.
+assert.deepEqual(exGap.filter((e) => e.obj === 7101).map((e) => [e.changeset, e.kind]), [[150, "refs"], [250, "refs"]]);
+assert.equal(exGap.find((e) => e.obj === 7101 && e.changeset === 150).detail, "nodes 2 → 3 (way v1 → v2)");
+assert.equal(exGap.find((e) => e.obj === 7101 && e.changeset === 250).detail, "nodes 3 → 2 (way v2 → v3)");
+// Way 7102: its node moved twice -> two moved events (never folded).
+assert.deepEqual(exGap.filter((e) => e.obj === 7102).map((e) => [e.changeset, e.kind]), [[150, "moved"], [250, "moved"]]);
+// Way 7103: refs change and node move in the same changeset -> one event.
+assert.deepEqual(exGap.filter((e) => e.obj === 7103).map((e) => [e.changeset, e.kind]), [[200, "refs"]]);
+// Node member EN2: moved twice in the gap -> two events; the move after
+// the last relation version (cs 350) has no gap and is not shown.
+assert.deepEqual(exGap.filter((e) => e.obj === EN2).map((e) => [e.changeset, e.kind]), [[150, "moved"], [250, "moved"]]);
+assert.deepEqual(exGap.find((e) => e.obj === EN2 && e.changeset === 150).oldPos, { lat: 63.84, lon: 20.18 });
+assert.deepEqual(exGap.find((e) => e.obj === EN2 && e.changeset === 150).newPos, { lat: 63.841, lon: 20.181 });
+// Way 7104 changed only before the first / after the last relation
+// version -> no event at all.
+assert.ok(!exGap.some((e) => e.obj === 7104));
+assert.equal(ex.versionDetails.size, 0);
 
 console.log("All editor logic tests passed.");
