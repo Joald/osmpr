@@ -421,4 +421,31 @@ const dc = transitiveClosureMembers(deepVersions[0], deepRelHists);
 assert.deepEqual(dc.ways.get(7005), [910001, 910002, 910003]);
 assert.ok(!dc.ways.has(7004), "4 levels of nesting are beyond the depth cap");
 
+// Node members are fetched first: a node member must still produce its
+// event when the way nodes alone already exceed the 1000-node cap.
+const manyNodes = [];
+const manyNodeHists = new Map();
+for (let n = 0; n < 1001; n++) {
+  const nid = 700000001 + n;
+  manyNodes.push(nid);
+  manyNodeHists.set(nid, nodeHist(nid, 63.84, 20.18, []));
+}
+manyNodeHists.set(8001, nodeHist(8001, 63.84, 20.18, [{ cs: 150, ts: "2016-01-15T00:00:00Z", lat: 63.841, lon: 20.181 }]));
+const manyWayHists = new Map([
+  [6001, wayHist(6001, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: manyNodes },
+    { cs: 200, ts: "2016-02-01T00:00:00Z", nodes: manyNodes },
+  ])],
+]);
+const capNodeVersions = [
+  { type: "relation", id: 900005, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "node", ref: 8001, role: "admin_centre" }] },
+  { type: "relation", id: 900005, version: 2, changeset: 200, timestamp: "2016-02-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "node", ref: 8001, role: "admin_centre" }] },
+];
+const cnr = computeMemberGeometryEvents(capNodeVersions, manyWayHists, manyNodeHists);
+assert.equal(cnr.partial, true);
+assert.equal((cnr.gaps.get(0) || []).length, 1);
+assert.equal(cnr.gaps.get(0)[0].objType, "node");
+assert.equal(cnr.gaps.get(0)[0].obj, 8001);
+assert.equal(cnr.gaps.get(0)[0].changeset, 150);
+
 console.log("All editor logic tests passed.");

@@ -437,12 +437,15 @@ function computeMemberGeometryEvents(versions, wayHist, nodeHist, relHist) {
   const ways = seenWays.slice(0, MEMBER_CHANGE_MAX_WAYS);
   if (seenWays.length > ways.length) partial = true;
   const nodeIds = [];
+  // Node members first: they are few and directly held by the relation,
+  // so they must never starve behind the (much larger) way-node list
+  // when the node cap truncates.
+  for (const nid of seenNodeMembers) if (!nodeIds.includes(nid)) nodeIds.push(nid);
   for (const wid of ways) {
     for (const e of wayHist.get(wid) || []) {
       for (const nid of e.nodes || []) if (!nodeIds.includes(nid)) nodeIds.push(nid);
     }
   }
-  for (const nid of seenNodeMembers) if (!nodeIds.includes(nid)) nodeIds.push(nid);
   const nodes = nodeIds.slice(0, MEMBER_CHANGE_MAX_NODES);
   if (nodeIds.length > nodes.length) partial = true;
   const nodeSet = new Set(nodes);
@@ -1096,12 +1099,15 @@ if (typeof document !== "undefined") {
     const ways = seenWays.slice(0, MEMBER_CHANGE_MAX_WAYS);
     const wayHist = await fetchAllChunked(ways, (wid) => fetchHistoryElements("way", wid), 10);
     const nodeIds = [];
+    // Node members first: they are few and directly held by the relation,
+    // so they must never starve behind the (much larger) way-node list
+    // when the node cap truncates.
+    for (const nid of seenNodeMembers) if (!nodeIds.includes(nid)) nodeIds.push(nid);
     for (const wid of ways) {
       for (const e of wayHist.get(wid) || []) {
         for (const nid of e.nodes || []) if (!nodeIds.includes(nid)) nodeIds.push(nid);
       }
     }
-    for (const nid of seenNodeMembers) if (!nodeIds.includes(nid)) nodeIds.push(nid);
     const nodes = nodeIds.slice(0, MEMBER_CHANGE_MAX_NODES);
     const nodeHist = await fetchAllChunked(nodes, (nid) => fetchHistoryElements("node", nid), 10);
     const res = computeMemberGeometryEvents(versions, wayHist, nodeHist, relHist);
