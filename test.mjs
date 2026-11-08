@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, computeMemberGeometryEvents };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, computeMemberGeometryEvents } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -314,5 +314,111 @@ const manyVersions = [
 const capRes = computeMemberGeometryEvents(manyVersions, new Map(), new Map());
 assert.equal(capRes.partial, true);
 assert.equal(capRes.gaps.size, 0);
+
+// --- transitive closure: node members + nested sub-relation ways ---
+function relHist(id, vs) {
+  return vs.map((v, k) => ({ type: "relation", id, version: k + 1, changeset: v.cs, timestamp: v.ts, visible: true, tags: {}, members: v.members }));
+}
+const S1 = 600000011, S2 = 600000012, S3 = 600000013;
+const nestedNodeHists = new Map([
+  [S1, nodeHist(S1, 63.84, 20.18, [])],
+  [S2, nodeHist(S2, 63.841, 20.181, [])],
+  [S3, nodeHist(S3, 63.842, 20.182, [])],
+  [8001, nodeHist(8001, 63.84, 20.18, [{ cs: 150, ts: "2016-01-15T00:00:00Z", lat: 63.841, lon: 20.181 }])],
+  [8002, nodeHist(8002, 63.85, 20.19, [{ cs: 200, ts: "2016-02-01T00:00:00Z", lat: 63.851, lon: 20.191 }])],
+]);
+const nestedWayHists = new Map([
+  [6001, wayHist(6001, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [S1, S2] },
+    { cs: 200, ts: "2016-02-01T00:00:00Z", nodes: [S1, S2] },
+  ])],
+  [7001, wayHist(7001, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", nodes: [S1, S2] },
+    { cs: 200, ts: "2016-02-01T00:00:00Z", nodes: [S1, S2, S3] },
+  ])],
+  [7002, wayHist(7002, [
+    { cs: 300, ts: "2016-03-01T00:00:00Z", nodes: [S2, S3] },
+  ])],
+]);
+const subRelHists = new Map([
+  [900100, relHist(900100, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "way", ref: 7001, role: "" }] },
+    { cs: 300, ts: "2016-03-01T00:00:00Z", members: [{ type: "way", ref: 7001, role: "" }, { type: "way", ref: 7002, role: "" }] },
+  ])],
+]);
+const parentVersions = [
+  { type: "relation", id: 900000, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "relation", ref: 900100, role: "subarea" }, { type: "node", ref: 8001, role: "admin_centre" }, { type: "node", ref: 8002, role: "label" }] },
+  { type: "relation", id: 900000, version: 2, changeset: 200, timestamp: "2016-02-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "relation", ref: 900100, role: "subarea" }, { type: "node", ref: 8001, role: "admin_centre" }, { type: "node", ref: 8002, role: "label" }] },
+  { type: "relation", id: 900000, version: 3, changeset: 300, timestamp: "2016-03-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "node", ref: 8001, role: "admin_centre" }, { type: "node", ref: 8002, role: "label" }] },
+  { type: "relation", id: 900000, version: 4, changeset: 400, timestamp: "2016-04-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "way", ref: 6001, role: "outer" }, { type: "relation", ref: 900100, role: "subarea" }, { type: "node", ref: 8001, role: "admin_centre" }, { type: "node", ref: 8002, role: "label" }] },
+];
+const tge = computeMemberGeometryEvents(parentVersions, nestedWayHists, nestedNodeHists, subRelHists);
+assert.equal(tge.partial, false);
+// Nested way 7001 extended 2 -> 3 nodes in v2's own changeset: coincident,
+// via the sub-relation. Moved label node 8002 in the same changeset:
+// coincident too. Ways first, then nodes, in insertion order.
+assert.equal((tge.versionDetails.get(1) || []).length, 2);
+const d7001 = tge.versionDetails.get(1)[0];
+assert.equal(d7001.objType, "way");
+assert.equal(d7001.obj, 7001);
+assert.equal(d7001.way, 7001);
+assert.deepEqual(d7001.via, [900100]);
+assert.equal(d7001.detail, "nodes 2 → 3 (way v1 → v2)");
+const d8002 = tge.versionDetails.get(1)[1];
+assert.equal(d8002.objType, "node");
+assert.equal(d8002.obj, 8002);
+assert.deepEqual(d8002.via, []);
+assert.equal(d8002.detail, "node position moved");
+// Moved admin_centre node 8001 in changeset 150: standalone gap event.
+const gap0 = tge.gaps.get(0) || [];
+assert.equal(gap0.length, 1);
+assert.equal(gap0[0].objType, "node");
+assert.equal(gap0[0].obj, 8001);
+assert.equal(gap0[0].kind, "moved");
+assert.equal(gap0[0].changeset, 150);
+assert.deepEqual(gap0[0].via, []);
+assert.deepEqual(gap0[0].oldPos, { lat: 63.84, lon: 20.18 });
+assert.deepEqual(gap0[0].newPos, { lat: 63.841, lon: 20.181 });
+// Sub-relation removed (v2->v3) and re-added (v3->v4): its ways are not
+// staying members in those gaps, so no events either way.
+assert.equal((tge.gaps.get(1) || []).length, 0);
+assert.equal((tge.gaps.get(2) || []).length, 0);
+assert.equal((tge.versionDetails.get(2) || []).length, 0);
+assert.equal((tge.versionDetails.get(3) || []).length, 0);
+// Closure shape: nested way via the sub-relation, direct node member.
+const c1 = transitiveClosureMembers(parentVersions[0], subRelHists);
+assert.deepEqual(c1.ways.get(7001), [900100]);
+assert.deepEqual(c1.ways.get(6001), []);
+assert.deepEqual(c1.nodes.get(8001), []);
+const c3 = transitiveClosureMembers(parentVersions[2], subRelHists);
+assert.ok(!c3.ways.has(7001));
+assert.ok(!c3.ways.has(7002));
+
+// A relation containing itself must not loop forever.
+const cyclicRelHists = new Map([
+  [900101, relHist(900101, [
+    { cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "relation", ref: 900101, role: "" }, { type: "way", ref: 7003, role: "" }] },
+  ])],
+]);
+const cyclicVersions = [
+  { type: "relation", id: 900002, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "relation", ref: 900101, role: "" }] },
+  { type: "relation", id: 900002, version: 2, changeset: 200, timestamp: "2016-02-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "relation", ref: 900101, role: "" }] },
+];
+const cc = transitiveClosureMembers(cyclicVersions[0], cyclicRelHists);
+assert.deepEqual(cc.ways.get(7003), [900101]);
+
+// Nesting depth: ways 3 relations down are included, 4 down are not.
+const deepRelHists = new Map([
+  [910001, relHist(910001, [{ cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "relation", ref: 910002, role: "" }] }])],
+  [910002, relHist(910002, [{ cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "relation", ref: 910003, role: "" }] }])],
+  [910003, relHist(910003, [{ cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "relation", ref: 910004, role: "" }, { type: "way", ref: 7005, role: "" }] }])],
+  [910004, relHist(910004, [{ cs: 100, ts: "2016-01-01T00:00:00Z", members: [{ type: "way", ref: 7004, role: "" }] }])],
+]);
+const deepVersions = [
+  { type: "relation", id: 900003, version: 1, changeset: 100, timestamp: "2016-01-01T00:00:00Z", user: "x", visible: true, tags: {}, members: [{ type: "relation", ref: 910001, role: "" }] },
+];
+const dc = transitiveClosureMembers(deepVersions[0], deepRelHists);
+assert.deepEqual(dc.ways.get(7005), [910001, 910002, 910003]);
+assert.ok(!dc.ways.has(7004), "4 levels of nesting are beyond the depth cap");
 
 console.log("All editor logic tests passed.");
