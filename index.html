@@ -2018,16 +2018,15 @@ if (typeof document !== "undefined") {
       setTimeout(() => { card.style.outline = ""; }, 2500);
     };
     // Mode switch: re-draw from the already collected drawables, no
-    // re-fetch. Refit only when the mode's geometry leaves the
-    // viewport, so a user who zoomed into a detail is not yanked out.
+    // re-fetch, and never touch pan/zoom — the switch only swaps which
+    // drawables are shown, so a user zoomed into a detail stays there.
     const setMode = (m) => {
       if (m === mode || !mapState) return;
       mode = m;
       for (const [k, b] of Object.entries(modeBtns)) b.classList.toggle("secondary", k !== mode);
       const shown = overviewModeDrawables(lastDrawables, mode);
       mapState.layers.clearLayers();
-      const bounds = addDrawablesToLayer(mapState.layers, shown, scrollToCard);
-      if (bounds.length && !mapState.map.getBounds().contains(L.latLngBounds(bounds))) mapState.map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+      addDrawablesToLayer(mapState.layers, shown, scrollToCard);
     };
     div.load = async () => {
       if (loading) { queued = true; return; }
