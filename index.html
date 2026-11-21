@@ -1991,17 +1991,20 @@ if (typeof document !== "undefined") {
         if (closed) layer = L.polygon(latlngs, { color, weight, fillColor: color, fillOpacity: 0.15 }).addTo(layers);
         else layer = L.polyline(latlngs, { color, weight }).addTo(layers);
       }
-      // Hover outline: a yellow halo behind the feature, so the hovered
-      // line, ring or dot stands out from its neighbours without
-      // changing its own colour. The halo is non-interactive, so it
-      // never blocks clicks or the tooltip; it is removed on mouseout.
+      // Hover outline: a thin yellow outline hugging the feature, the
+      // way graphic editors highlight hovered geometry — just 1 px of
+      // yellow on each side of a line, a thin ring around a dot — so
+      // the hovered line, ring or dot stands out from its neighbours
+      // without changing its own colour and without a chunky band or a
+      // bounding box. The outline is non-interactive, so it never
+      // blocks clicks or the tooltip; it is removed on mouseout.
       if (layer) {
         let halo = null;
         const showHalo = () => {
           if (halo) return;
-          if (latlngs.length === 1) halo = L.circleMarker(latlngs[0], { radius: 11, color: "#ffd60a", weight: 2, fillColor: "#ffd60a", fillOpacity: 0.3, interactive: false }).addTo(layers);
-          else if (closed) halo = L.polygon(latlngs, { color: "#ffd60a", weight: weight + 6, fill: false, interactive: false }).addTo(layers);
-          else halo = L.polyline(latlngs, { color: "#ffd60a", weight: weight + 6, opacity: 0.9, interactive: false }).addTo(layers);
+          if (latlngs.length === 1) halo = L.circleMarker(latlngs[0], { radius: 9, color: "#ffd60a", weight: 2, fillColor: "#ffd60a", fillOpacity: 0.15, interactive: false }).addTo(layers);
+          else if (closed) halo = L.polygon(latlngs, { color: "#ffd60a", weight: weight + 2, fill: false, interactive: false }).addTo(layers);
+          else halo = L.polyline(latlngs, { color: "#ffd60a", weight: weight + 2, opacity: 0.9, interactive: false }).addTo(layers);
           halo.bringToBack();
           layer.bringToFront();
         };
