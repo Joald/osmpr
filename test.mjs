@@ -724,15 +724,17 @@ assert.deepEqual(overviewModeDrawables([omStandalone], "after").map((d) => d.obj
 const wpPairs = [
   { action: "modify", oldObj: { type: "relation", id: 52818, members: [{ type: "way", ref: 28445305, role: "outer" }, { type: "way", ref: 26557540, role: "outer" }] }, newObj: { type: "relation", id: 52818, members: [{ type: "way", ref: 28445305, role: "outer2" }, { type: "way", ref: 457539035, role: "outer" }] } },
   { action: "create", oldObj: null, newObj: { type: "relation", id: 999, members: [{ type: "way", ref: -4, role: "outer" }] } },
+  { action: "modify", oldObj: { type: "relation", id: 777, members: [{ type: "way", ref: 28445305, role: "outer" }] }, newObj: { type: "relation", id: 777, members: [{ type: "way", ref: 28445305, role: "outer" }] } },
 ];
 const wp = wayParentMaps(wpPairs);
-assert.deepEqual(wp.old.get(28445305), { type: "relation", id: 52818 });
-assert.deepEqual(wp.new.get(28445305), { type: "relation", id: 52818 });
-assert.equal(wp.old.get(26557540).id, 52818, "removed member keeps its old parent");
+assert.deepEqual(wp.old.get(28445305), [{ type: "relation", id: 52818 }, { type: "relation", id: 777 }], "a way in two relations lists both, first-seen order");
+assert.deepEqual(wp.new.get(28445305), [{ type: "relation", id: 52818 }, { type: "relation", id: 777 }]);
+assert.deepEqual(wp.old.get(26557540), [{ type: "relation", id: 52818 }], "removed member keeps its old parent");
 assert.equal(wp.new.get(26557540), undefined, "removed member has no new parent");
 assert.equal(wp.old.get(457539035), undefined, "added member has no old parent");
-assert.equal(wp.new.get(457539035).id, 52818, "added member gets its new parent");
-assert.deepEqual(wp.new.get(-4), { type: "relation", id: 999 }, "created relation's members map too");
+assert.deepEqual(wp.new.get(457539035), [{ type: "relation", id: 52818 }], "added member gets its new parent");
+assert.deepEqual(wp.new.get(-4), [{ type: "relation", id: 999 }], "created relation's members map too");
+assert.deepEqual(wayParentMaps([{ action: "modify", oldObj: { type: "relation", id: 5, members: [{ type: "way", ref: 1, role: "outer" }, { type: "way", ref: 1, role: "outer" }] }, newObj: { type: "relation", id: 5, members: [] } }]).old.get(1), [{ type: "relation", id: 5 }], "duplicate member entries dedup");
 assert.deepEqual(wayParentMaps([]), { old: new Map(), new: new Map() });
 assert.deepEqual(wayParentMaps(null), { old: new Map(), new: new Map() });
 // Node markers use kinds "old"/"new", not "removed"/"added" — a

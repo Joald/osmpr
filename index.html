@@ -147,11 +147,17 @@
   .osmpr-popup-via { color: #9aa0a6; font-size: 0.85rem; margin: 0 0 10px; }
   .osmpr-popup-via a { color: #7fb3e8; text-decoration: none; }
   .osmpr-popup-via a:hover { text-decoration: underline; }
-  /* The "Member of relation" name is a button that selects the
-     relation on the map, so it is styled like the popup's links. */
+  /* The "Member of" name is a button that selects the relation on
+     the map, so it is styled like the popup's links. It stays an
+     inline element: the full-width rule below is only for the
+     popup's action button, and a full-width centred button made the
+     line read as indented. */
   .osmpr-popup-via button { background: none; border: none; padding: 0; margin: 0; color: #7fb3e8; cursor: pointer; font-family: inherit; font-size: inherit; text-decoration: none; }
   .osmpr-popup-via button:hover { text-decoration: underline; }
-  .leaflet-popup-content button { width: 100%; }
+  .osmpr-popup-action { width: 100%; }
+  /* Every link that leaves the page for openstreetmap.org carries a
+     small external arrow, so it reads as an exit, not navigation. */
+  a.osmpr-ext::after, .leaflet-control-attribution a::after { content: " \2197"; }
 </style>
 </head>
 <body>
@@ -1011,18 +1017,24 @@ function overviewModeDrawables(drawables, mode) {
   return shown.filter((d) => !(d.pts && d.pts.length === 1 && hasCoords(d.pts[0]) && vertices.has(d.pts[0].lat.toFixed(7) + "," + d.pts[0].lon.toFixed(7))));
 }
 
-// Parent relations among the pairs, for the membership line in the
+// Parent relations among the pairs, for the membership lines in the
 // overview popup: a way's own segment diff does not know its
-// relations, so a changed member way showed no "Member of relation"
-// at all — its own drawables carry no via, and the member draws for
+// relations, so a changed member way showed no "Member of" at all —
+// its own drawables carry no via, and the member draws for
 // in-change ways had it nulled. Old side for removed geometry, new
-// side for added; a way in several relations keeps the first.
+// side for added; a way in several relations lists all of them, in
+// first-seen order.
 function wayParentMaps(pairs) {
   const oldMap = new Map(), newMap = new Map();
+  const add = (map, wayRef, relId) => {
+    if (!map.has(wayRef)) map.set(wayRef, []);
+    const list = map.get(wayRef);
+    if (!list.some((r) => r.id === relId)) list.push({ type: "relation", id: relId });
+  };
   for (const p of pairs || []) {
     const o = p.oldObj, n = p.newObj;
-    if (o && o.type === "relation") for (const m of o.members || []) if (m.type === "way" && !oldMap.has(m.ref)) oldMap.set(m.ref, { type: "relation", id: o.id });
-    if (n && n.type === "relation") for (const m of n.members || []) if (m.type === "way" && !newMap.has(m.ref)) newMap.set(m.ref, { type: "relation", id: n.id });
+    if (o && o.type === "relation") for (const m of o.members || []) if (m.type === "way") add(oldMap, m.ref, o.id);
+    if (n && n.type === "relation") for (const m of n.members || []) if (m.type === "way") add(newMap, m.ref, n.id);
   }
   return { old: oldMap, new: newMap };
 }
@@ -1052,14 +1064,17 @@ if (typeof document !== "undefined") {
   }
   function osmLink(type, id) {
     if (id < 0) {
-      // Placeholder for a new object (created on upload): no OSM page yet.
+      // Placeholder for a new object (created on upload): no OSM page
+      // yet, so no link — but show the temporary id, not just "new":
+      // one change can create several objects and "new" says nothing
+      // about which one this is.
       const s = document.createElement("span");
-      s.className = "add"; s.textContent = "new";
+      s.className = "add"; s.textContent = String(id);
       return s;
     }
     const a = document.createElement("a");
     a.href = "https://www.openstreetmap.org/" + type + "/" + id;
-    a.target = "_blank"; a.rel = "noopener"; a.textContent = id;
+    a.target = "_blank"; a.rel = "noopener"; a.className = "osmpr-ext"; a.textContent = id;
     return a;
   }
   function displayNameEl(type, id, name) {
@@ -1891,6 +1906,16 @@ if (typeof document !== "undefined") {
       if (refs) return (which === "old" ? lineOld : lineNew)(refs);
       return (which === "old" ? cache.externalOld : cache.externalNew).get(m.ref) || null;
     };
+    // Parent relations among the pairs (see wayParentMaps): a way's
+    // own segment diff carries no membership, so without this a
+    // changed member way showed no "Member of" in its popup.
+    const parents = wayParentMaps(pairs);
+    const parentFor = (wayId, kind) => {
+      const primary = kind === "removed" ? parents.old.get(wayId) : parents.new.get(wayId);
+      if (primary && primary.length) return primary;
+      const fallback = kind === "removed" ? parents.new.get(wayId) : parents.old.get(wayId);
+      return fallback || [];
+    };
     // Every drawable carries its object and its card target, so a click
     // on the map can say what it is and scroll to its card. A member way
     // that is itself in the changeset targets its own card; an external
@@ -1908,6 +1933,10 @@ if (typeof document !== "undefined") {
         if (kind === "unchanged" && inChangeset) continue;
         const pts = memberPts(m, which);
         if (!pts) continue;
+        // The membership lines in the popup list every parent relation
+        // of the way, on the side this draw shows (old side for a
+        // removed member, new side for an added one).
+        const viaList = (which === "old" ? parents.old.get(m.ref) : parents.new.get(m.ref)) || (which === "old" ? parents.new.get(m.ref) : parents.old.get(m.ref)) || [];
         drawables.push({
           kind, pts,
           obj: { type: "way", id: m.ref },
@@ -1915,15 +1944,10 @@ if (typeof document !== "undefined") {
           // The way's own pair does not know its relations, so the
           // member draw carries the membership for the popup — also
           // for ways that are themselves in the change.
-          via: { type: "relation", id: relId },
+          via: viaList,
         });
       }
     };
-    // Parent relations among the pairs (see wayParentMaps): a way's
-    // own segment diff carries no membership, so without this a
-    // changed member way showed no "Member of relation" in its popup.
-    const parents = wayParentMaps(pairs);
-    const parentFor = (wayId, kind) => kind === "removed" ? (parents.old.get(wayId) || parents.new.get(wayId) || null) : (parents.new.get(wayId) || parents.old.get(wayId) || null);
     for (let pi = 0; pi < pairs.length; pi++) {
       const p = pairs[pi];
       if (p.action === "create") {
@@ -1979,9 +2003,18 @@ if (typeof document !== "undefined") {
   }
   const OVERVIEW_KIND_LABEL = { added: "Added", removed: "Removed", unchanged: "Unchanged", kept: "Kept", old: "Old version", new: "New version", connector: "Moved" };
   function osmObjectLink(obj) {
+    if (obj.id < 0) {
+      // Placeholder: no OSM page yet, so plain text, not a link to a
+      // page that would 404.
+      const s = document.createElement("span");
+      s.className = "add";
+      s.textContent = obj.type + " " + obj.id;
+      return s;
+    }
     const a = document.createElement("a");
     a.href = "https://www.openstreetmap.org/" + obj.type + "/" + obj.id;
     a.target = "_blank"; a.rel = "noopener";
+    a.className = "osmpr-ext";
     a.textContent = obj.type + " " + obj.id;
     return a;
   }
@@ -1998,27 +2031,30 @@ if (typeof document !== "undefined") {
     badge.textContent = OVERVIEW_KIND_LABEL[d.kind] || d.kind;
     title.appendChild(badge);
     wrap.appendChild(title);
-    if (d.via) {
-      const via = document.createElement("div");
-      via.className = "osmpr-popup-via";
-      // The relation name selects the relation on the map (every drawn
-      // member gets the strong selection outline); OSM stays a separate
-      // external link instead of being the relation's own click target.
-      const sel = document.createElement("button");
-      sel.type = "button";
-      sel.textContent = "Member of relation " + d.via.id;
-      sel.addEventListener("click", () => { if (onSelectRelation) onSelectRelation(d.via.id); });
-      via.appendChild(sel);
-      via.appendChild(document.createTextNode(" "));
-      const osm = document.createElement("a");
-      osm.href = "https://www.openstreetmap.org/relation/" + d.via.id;
-      osm.target = "_blank"; osm.rel = "noopener";
-      osm.textContent = "OSM";
-      via.appendChild(osm);
-      wrap.appendChild(via);
+    if (d.via && d.via.length) {
+      // A way can belong to several relations: one line each, every
+      // one selectable on the map, OSM a separate external link.
+      for (const rel of d.via) {
+        const via = document.createElement("div");
+        via.className = "osmpr-popup-via";
+        const sel = document.createElement("button");
+        sel.type = "button";
+        sel.textContent = "Member of " + rel.id;
+        sel.addEventListener("click", () => { if (onSelectRelation) onSelectRelation(rel.id); });
+        via.appendChild(sel);
+        via.appendChild(document.createTextNode(" "));
+        const osm = document.createElement("a");
+        osm.href = "https://www.openstreetmap.org/relation/" + rel.id;
+        osm.target = "_blank"; osm.rel = "noopener";
+        osm.className = "osmpr-ext";
+        osm.textContent = "OSM";
+        via.appendChild(osm);
+        wrap.appendChild(via);
+      }
     }
     const btn = document.createElement("button");
     btn.type = "button";
+    btn.className = "osmpr-popup-action";
     btn.textContent = "Scroll to card";
     btn.addEventListener("click", () => onPick(d));
     wrap.appendChild(btn);
@@ -2033,7 +2069,7 @@ if (typeof document !== "undefined") {
     if (!plain) drawables = styleOverlappingDrawables(drawables);
     const bounds = [];
     // One selected set per layers group. A click selects a feature,
-    // the popup's "Member of relation" button selects a whole relation.
+    // the popup's "Member of" button selects a whole relation.
     // Layers are rebuilt on every redraw, so a stale selection is
     // dropped here; its layers are gone and deselecting them no-ops.
     layers._osmprSelection = null;
@@ -2054,7 +2090,7 @@ if (typeof document !== "undefined") {
       layers.eachLayer((l) => {
         const dd = l._osmprDrawable;
         if (!dd) return;
-        if ((dd.via && dd.via.type === "relation" && dd.via.id === relId) || (dd.obj && dd.obj.type === "relation" && dd.obj.id === relId)) list.push(l);
+        if ((dd.via && dd.via.some((r) => r.type === "relation" && r.id === relId)) || (dd.obj && dd.obj.type === "relation" && dd.obj.id === relId)) list.push(l);
       });
       selectLayers(list);
     };
@@ -2303,7 +2339,7 @@ if (typeof document !== "undefined") {
     p.appendChild(document.createTextNode("Uploaded successfully. Changeset: "));
     const a = document.createElement("a");
     a.href = "https://www.openstreetmap.org/changeset/" + changesetId;
-    a.target = "_blank"; a.rel = "noopener"; a.textContent = changesetId;
+    a.target = "_blank"; a.rel = "noopener"; a.className = "osmpr-ext"; a.textContent = changesetId;
     p.appendChild(a);
     row.appendChild(p);
     const close = el("button", "Close", "secondary");
@@ -2336,7 +2372,7 @@ if (typeof document !== "undefined") {
       info.appendChild(document.createTextNode("Changeset: "));
       const a = document.createElement("a");
       a.href = "https://www.openstreetmap.org/changeset/" + changesetId;
-      a.target = "_blank"; a.rel = "noopener"; a.textContent = changesetId;
+      a.target = "_blank"; a.rel = "noopener"; a.className = "osmpr-ext"; a.textContent = changesetId;
       info.appendChild(a);
       info.appendChild(document.createTextNode(changesetClosed
         ? " (closed; objects uploaded before the failure remain uploaded)."
@@ -3283,7 +3319,7 @@ if (typeof document !== "undefined") {
     vh.appendChild(document.createTextNode("Changeset "));
     const va = document.createElement("a");
     va.href = "https://www.openstreetmap.org/changeset/" + id;
-    va.target = "_blank"; va.rel = "noopener"; va.textContent = id;
+    va.target = "_blank"; va.rel = "noopener"; va.className = "osmpr-ext"; va.textContent = id;
     vh.appendChild(va);
     vh.hidden = false;
     $("preview").innerHTML = "";
