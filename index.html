@@ -976,6 +976,19 @@ function styleOverlappingDrawables(drawables) {
   return out;
 }
 
+// Overview map modes: "diff" is the change as collected (red removed,
+// green added, orange kept, grey unchanged); "before" shows only the
+// old state and "after" only the new state, both drawn in plain grey
+// (colorKind), so the map reads as the geometry itself, not the change.
+// Connectors (old→new) exist only in the diff. The original kind is
+// kept, so the click popup still says what the object is doing.
+function overviewModeDrawables(drawables, mode) {
+  if (!drawables) return [];
+  if (mode !== "before" && mode !== "after") return drawables;
+  const keep = mode === "before" ? new Set(["removed", "unchanged", "kept"]) : new Set(["added", "unchanged", "kept"]);
+  return drawables.filter((d) => keep.has(d.kind)).map((d) => ({ ...d, colorKind: "unchanged" }));
+}
+
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -1950,7 +1963,7 @@ if (typeof document !== "undefined") {
       // one bad drawable can never kill the whole overview map.
       const pts = cleanPts(d.pts);
       if (!pts.length) continue;
-      const color = MAP_COLORS[d.kind] || MAP_COLORS.unchanged;
+      const color = MAP_COLORS[d.colorKind || d.kind] || MAP_COLORS.unchanged;
       const weight = d.weight || 3;
       const latlngs = pts.map((p) => [p.lat, p.lon]);
       bounds.push(...latlngs);
@@ -1979,6 +1992,11 @@ if (typeof document !== "undefined") {
     // Re-entrant guard: a refresh requested while a draw is in flight runs
     // once afterwards, against the then-current pairs, instead of racing it.
     let loading = false, queued = false, mapState = null;
+    // Overview mode: "diff" (default) shows the change, "before" the
+    // old state only, "after" the new state only. lastDrawables keeps
+    // the full collected set, so a mode switch re-draws without
+    // re-fetching; modeBtns is filled when the toggle row is created.
+    let mode = "diff", lastDrawables = [], modeBtns = {};
     // Popup button action: close the popup, expand the card's group if
     // it was collapsed, scroll to the card (resolved at click time, so
     // batch re-renders cannot leave a stale element) and flash it.
@@ -1999,15 +2017,35 @@ if (typeof document !== "undefined") {
       card.style.outline = "2px solid #7ee787";
       setTimeout(() => { card.style.outline = ""; }, 2500);
     };
+    // Mode switch: re-draw from the already collected drawables, no
+    // re-fetch. Refit only when the mode's geometry leaves the
+    // viewport, so a user who zoomed into a detail is not yanked out.
+    const setMode = (m) => {
+      if (m === mode || !mapState) return;
+      mode = m;
+      for (const [k, b] of Object.entries(modeBtns)) b.classList.toggle("secondary", k !== mode);
+      const shown = overviewModeDrawables(lastDrawables, mode);
+      mapState.layers.clearLayers();
+      const bounds = addDrawablesToLayer(mapState.layers, shown, scrollToCard);
+      if (bounds.length && !mapState.map.getBounds().contains(L.latLngBounds(bounds))) mapState.map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+    };
     div.load = async () => {
       if (loading) { queued = true; return; }
       loading = true;
       try {
         const { drawables, truncated } = await collectOverviewDrawables(pairs, cache, changesetId);
+        lastDrawables = drawables;
+        const shown = overviewModeDrawables(drawables, mode);
         if (!drawables.length) {
           if (!mapState) { div.innerHTML = ""; div.appendChild(el("p", emptyText || "No drawable geometry for this changeset.", "muted")); }
         } else if (!mapState) {
           div.innerHTML = "";
+          // Before | After | Diff toggle, above the map; Diff default.
+          const sw = makeSwitch(["Before", "After", "Diff"]);
+          sw.btns.diff.classList.remove("secondary");
+          for (const k of Object.keys(sw.btns)) sw.btns[k].addEventListener("click", () => setMode(k));
+          modeBtns = sw.btns;
+          div.appendChild(sw.wrap);
           const mapDiv = document.createElement("div");
           mapDiv.style.height = "420px";
           div.appendChild(mapDiv);
@@ -2015,7 +2053,7 @@ if (typeof document !== "undefined") {
           const map = L.map(mapDiv);
           L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
           const layers = L.layerGroup().addTo(map);
-          const bounds = addDrawablesToLayer(layers, drawables, scrollToCard);
+          const bounds = addDrawablesToLayer(layers, shown, scrollToCard);
           if (bounds.length) {
             map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
             map.invalidateSize();
@@ -2028,7 +2066,7 @@ if (typeof document !== "undefined") {
           }
         } else {
           mapState.layers.clearLayers();
-          const bounds = addDrawablesToLayer(mapState.layers, drawables, scrollToCard);
+          const bounds = addDrawablesToLayer(mapState.layers, shown, scrollToCard);
           // Prefill pairs arrive one card at a time, so the first fit
           // only covers the first object; refit when later geometry
           // lands outside the current viewport (same rule as the

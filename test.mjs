@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables, overviewModeDrawables };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables, overviewModeDrawables } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -683,5 +683,30 @@ assert.equal(stRings.length, 2);
 assert.equal(stRings[0].pts.length, 5);
 assert.equal(stRings[0].weight, 7);
 assert.equal(stRings[1].weight, 3);
+
+// --- overview map modes: Before | After | Diff ---
+// Diff returns the collected set untouched; Before keeps only the
+// old-side drawables (removed/unchanged/kept), After only the new-side
+// ones (added/unchanged/kept); connectors exist only in the diff.
+// Both state modes draw in plain grey (colorKind) but keep the
+// original kind, so the click popup still says what the object does.
+const omIn = [
+  { kind: "removed", pts: stPts, obj: { type: "way", id: 1 } },
+  { kind: "added", pts: stPts, obj: { type: "way", id: 1 } },
+  { kind: "kept", pts: stPts, obj: { type: "way", id: 2 } },
+  { kind: "unchanged", pts: stPts, obj: { type: "way", id: 3 } },
+  { kind: "connector", pts: stPts },
+  { kind: "added", pts: [{ lat: 0, lon: 0 }], obj: { type: "node", id: 9 } },
+  { kind: "removed", pts: [{ lat: 1, lon: 1 }], obj: { type: "node", id: 9 } },
+];
+assert.equal(overviewModeDrawables(omIn, "diff"), omIn);
+assert.deepEqual(overviewModeDrawables(omIn, "before").map((d) => d.kind), ["removed", "kept", "unchanged", "removed"]);
+assert.deepEqual(overviewModeDrawables(omIn, "after").map((d) => d.kind), ["added", "kept", "unchanged", "added"]);
+const omBefore = overviewModeDrawables(omIn, "before");
+assert.ok(omBefore.every((d) => d.colorKind === "unchanged"));
+assert.equal(omBefore[0].obj.id, 1, "original kind and object survive the copy");
+assert.equal(overviewModeDrawables(omIn, "bogus"), omIn, "unknown mode falls back to diff");
+assert.deepEqual(overviewModeDrawables([], "before"), []);
+assert.deepEqual(overviewModeDrawables(null, "after"), []);
 
 console.log("All editor logic tests passed.");
