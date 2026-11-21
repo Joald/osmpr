@@ -147,6 +147,10 @@
   .osmpr-popup-via { color: #9aa0a6; font-size: 0.85rem; margin: 0 0 10px; }
   .osmpr-popup-via a { color: #7fb3e8; text-decoration: none; }
   .osmpr-popup-via a:hover { text-decoration: underline; }
+  /* The "Member of relation" name is a button that selects the
+     relation on the map, so it is styled like the popup's links. */
+  .osmpr-popup-via button { background: none; border: none; padding: 0; margin: 0; color: #7fb3e8; cursor: pointer; font-family: inherit; font-size: inherit; text-decoration: none; }
+  .osmpr-popup-via button:hover { text-decoration: underline; }
   .leaflet-popup-content button { width: 100%; }
 </style>
 </head>
@@ -1728,6 +1732,19 @@ if (typeof document !== "undefined") {
         div.innerHTML = "";
         div._osmprMap = null;
         div.appendChild(el("p", "Map failed to load: " + e.message, "del"));
+        // A failed map is usually a transient fetch error, so offer a
+        // retry instead of a dead end: it re-runs the same collect
+        // and draw. (A 404 for a placeholder node will fail again —
+        // the fetch itself is the problem there, not the attempt.)
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", () => {
+          div.innerHTML = "";
+          div.appendChild(el("p", "Loading map…", "muted"));
+          loadPromise = render(oldObj, newObj, bounds, opts);
+        });
+        div.appendChild(retry);
       }
     };
     div.load = () => {
@@ -1947,7 +1964,7 @@ if (typeof document !== "undefined") {
   // Click popup for an overview drawable: what the object is, and a
   // button that scrolls to its card. Clicking the map element itself
   // never scrolls — only the button inside the popup does.
-  function overviewPopupContent(d, onPick) {
+  function overviewPopupContent(d, onPick, onSelectRelation) {
     const wrap = document.createElement("div");
     const title = document.createElement("div");
     title.className = "osmpr-popup-title";
@@ -1960,8 +1977,20 @@ if (typeof document !== "undefined") {
     if (d.via) {
       const via = document.createElement("div");
       via.className = "osmpr-popup-via";
-      via.appendChild(document.createTextNode("Member of relation "));
-      via.appendChild(osmObjectLink(d.via));
+      // The relation name selects the relation on the map (every drawn
+      // member gets the strong selection outline); OSM stays a separate
+      // external link instead of being the relation's own click target.
+      const sel = document.createElement("button");
+      sel.type = "button";
+      sel.textContent = "Member of relation " + d.via.id;
+      sel.addEventListener("click", () => { if (onSelectRelation) onSelectRelation(d.via.id); });
+      via.appendChild(sel);
+      via.appendChild(document.createTextNode(" "));
+      const osm = document.createElement("a");
+      osm.href = "https://www.openstreetmap.org/relation/" + d.via.id;
+      osm.target = "_blank"; osm.rel = "noopener";
+      osm.textContent = "OSM";
+      via.appendChild(osm);
       wrap.appendChild(via);
     }
     const btn = document.createElement("button");
@@ -1979,6 +2008,32 @@ if (typeof document !== "undefined") {
     // random stretches thicker — plain mode draws them all at weight 3.
     if (!plain) drawables = styleOverlappingDrawables(drawables);
     const bounds = [];
+    // One selected set per layers group. A click selects a feature,
+    // the popup's "Member of relation" button selects a whole relation.
+    // Layers are rebuilt on every redraw, so a stale selection is
+    // dropped here; its layers are gone and deselecting them no-ops.
+    layers._osmprSelection = null;
+    const clearSelection = () => {
+      const sel = layers._osmprSelection;
+      if (!sel) return;
+      layers._osmprSelection = null;
+      for (const l of sel) l._osmprDeselect && l._osmprDeselect();
+    };
+    const selectLayers = (list) => {
+      clearSelection();
+      if (!list.length) return;
+      layers._osmprSelection = list.slice();
+      for (const l of list) l._osmprSelect && l._osmprSelect();
+    };
+    const selectRelation = (relId) => {
+      const list = [];
+      layers.eachLayer((l) => {
+        const dd = l._osmprDrawable;
+        if (!dd) return;
+        if ((dd.via && dd.via.type === "relation" && dd.via.id === relId) || (dd.obj && dd.obj.type === "relation" && dd.obj.id === relId)) list.push(l);
+      });
+      selectLayers(list);
+    };
     for (const d of drawables) {
       // Last line of defence: drop points without real coordinates, so
       // one bad drawable can never kill the whole overview map.
@@ -2003,24 +2058,39 @@ if (typeof document !== "undefined") {
       // the hovered line, ring or dot stands out from its neighbours
       // without changing its own colour and without a chunky band or a
       // bounding box. The outline is non-interactive, so it never
-      // blocks clicks or the tooltip; it is removed on mouseout.
+      // blocks clicks or the tooltip.
+      // Clicking a feature SELECTS it instead: the outline gets
+      // stronger (2 px each side, a wider ring) and stays until the
+      // popup closes or another feature is picked — clicking must not
+      // take the highlight away. The old code dropped it on mouseout,
+      // which is exactly what the popup panning the map under the
+      // cursor fires right after a click.
       if (layer) {
-        let halo = null;
-        const showHalo = () => {
-          if (halo) return;
-          if (latlngs.length === 1) halo = L.circleMarker(latlngs[0], { radius: 9, color: "#ffd60a", weight: 2, fillColor: "#ffd60a", fillOpacity: 0.15, interactive: false }).addTo(layers);
-          else if (closed) halo = L.polygon(latlngs, { color: "#ffd60a", weight: weight + 2, fill: false, interactive: false }).addTo(layers);
-          else halo = L.polyline(latlngs, { color: "#ffd60a", weight: weight + 2, opacity: 0.9, interactive: false }).addTo(layers);
+        let halo = null, selected = false;
+        const setHalo = (strong) => {
+          if (halo) { layers.removeLayer(halo); halo = null; }
+          const w = weight + (strong ? 4 : 2);
+          if (latlngs.length === 1) halo = L.circleMarker(latlngs[0], { radius: strong ? 11 : 9, color: "#ffd60a", weight: 2, fillColor: "#ffd60a", fillOpacity: strong ? 0.3 : 0.15, interactive: false }).addTo(layers);
+          else if (closed) halo = L.polygon(latlngs, { color: "#ffd60a", weight: w, fill: false, interactive: false }).addTo(layers);
+          else halo = L.polyline(latlngs, { color: "#ffd60a", weight: w, opacity: strong ? 1 : 0.9, interactive: false }).addTo(layers);
           halo.bringToBack();
           layer.bringToFront();
         };
-        const hideHalo = () => { if (halo) { layers.removeLayer(halo); halo = null; } };
-        layer.on("mouseover", showHalo);
-        layer.on("mouseout", hideHalo);
+        const clearHalo = () => { if (halo) { layers.removeLayer(halo); halo = null; } };
+        layer._osmprDrawable = d;
+        layer._osmprSelect = () => { selected = true; setHalo(true); };
+        layer._osmprDeselect = () => { selected = false; clearHalo(); };
+        layer.on("mouseover", () => { if (!halo) setHalo(selected); });
+        layer.on("mouseout", () => { if (!selected) clearHalo(); });
+        layer.on("click", () => selectLayers([layer]));
+        layer.on("popupclose", () => {
+          const sel = layers._osmprSelection;
+          if (sel && sel.includes(layer)) clearSelection();
+        });
       }
       if (layer && d.obj && onPick) {
         layer.bindTooltip(d.obj.type + " " + d.obj.id, { className: "osmpr-tooltip" });
-        layer.bindPopup(overviewPopupContent(d, onPick));
+        layer.bindPopup(overviewPopupContent(d, onPick, selectRelation));
       }
     }
     return bounds;
@@ -2122,6 +2192,15 @@ if (typeof document !== "undefined") {
         div.innerHTML = "";
         mapState = null;
         div.appendChild(el("p", "Overview map failed to load: " + e.message, "del"));
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", () => {
+          div.innerHTML = "";
+          div.appendChild(el("p", "Loading overview map…", "muted"));
+          div.load();
+        });
+        div.appendChild(retry);
       } finally {
         loading = false;
         if (queued) { queued = false; div.load(); }
