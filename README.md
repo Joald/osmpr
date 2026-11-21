@@ -24,7 +24,10 @@ shareable link: open the link, review the diff, click Upload.
    object on one map (nodes, ways, and relation member ways).
    Prefill view has the same overview map above its cards: it sums
    the whole pending change (current state against the computed new
-   state), filling in as each object loads.
+   state), filling in as each object loads. A prefill can also list
+   `context` relations — unchanged relations whose members are
+   changed — which draw grey on the overview map for context, without
+   creating cards or affecting the upload.
 3. You click **Upload**. The page creates one changeset, uploads every
    changed object, and closes the changeset. A toast confirms the
    upload, and the page switches to the new changeset's view. A failed

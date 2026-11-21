@@ -226,6 +226,7 @@
     <li>Member operations only apply to relations. Tag operations apply to nodes, ways, and relations.</li>
     <li>Geometry: a node change may set <code>lat</code> and <code>lon</code> (both, decimal degrees); a way change may set <code>nodes</code> (array of node ids). The Map view draws the object and highlights old vs new geometry; Diff shows them in a Geometry section.</li>
     <li>New objects: use a negative id (e.g. <code>-1</code>) in a change. The object is created on upload, and other changes can reference it by that id — list created objects before the changes that reference them.</li>
+    <li><code>context</code> lists extra relations shown on the overview map only, for context: relations that are not changed themselves but whose members are. Accepts relation objects (<code>{"type": "relation", "id": 52796}</code>) or plain ids (<code>[52796]</code>). It never creates cards and never affects the upload.</li>
     <li>Delete an object: set <code>"delete": true</code> in a change. Upload sends DELETE after creates and modifies; the object must not be used by another object, or the server refuses (412). Other operations in the same change are ignored.</li>
     <li>Map view shows the object on OpenStreetMap tiles (Leaflet, loaded from CDN the first time Map is opened).</li>
     <li>Upload is disabled when every computed object is unchanged (so re-opening an already-applied link cannot re-upload it).</li>
@@ -298,7 +299,20 @@ function parsePrefill(search) {
         lat: c.lat ?? null, lon: c.lon ?? null, nodes: c.nodes ?? null,
       };
     });
-    return { comment: obj.comment || "", changes };
+    // Display-only context: relations that are not changed themselves
+    // but whose members are, drawn on the overview map for context.
+    // Never reaches the upload: loadPreview builds cards and the .osc
+    // from `changes` only. Accepts relation objects or plain ids;
+    // anything else (other types, bad ids, duplicates) is dropped.
+    const context = [];
+    if (Array.isArray(obj.context)) {
+      for (const c of obj.context) {
+        const id = typeof c === "number" ? c : (c && c.id);
+        const type = typeof c === "object" && c !== null && c.type ? normType(c.type) : "relation";
+        if (type === "relation" && Number.isFinite(id) && !context.some((e) => e.id === id)) context.push({ type, id });
+      }
+    }
+    return { comment: obj.comment || "", changes, context };
   }
   const rel = params.get("rel");
   if (rel) {
@@ -313,7 +327,7 @@ function parsePrefill(search) {
       return { type: m.type, ref: m.ref, role: m.role, roleGiven };
     }).filter(Boolean);
     const v = params.get("v");
-    return { comment: params.get("comment") || "", changes: [{ type: "relation", id, version: v ? parseInt(v, 10) : null, add, remove, tags: {}, lat: null, lon: null, nodes: null }] };
+    return { comment: params.get("comment") || "", changes: [{ type: "relation", id, version: v ? parseInt(v, 10) : null, add, remove, tags: {}, lat: null, lon: null, nodes: null }], context: [] };
   }
   return null;
 }
@@ -1792,7 +1806,7 @@ if (typeof document !== "undefined") {
     };
     return div;
   }
-  async function collectOverviewDrawables(pairs, cache, changesetId) {
+  async function collectOverviewDrawables(pairs, cache, changesetId, context) {
     // One drawable set for a whole changeset, with shared fetches: node
     // coordinates for all changed ways are fetched once (batched), and
     // each external relation member way is fetched once per side, capped
@@ -1810,6 +1824,7 @@ if (typeof document !== "undefined") {
     const oldBound = live ? null : { changeset: csNum, inclusive: false };
     const newBound = live ? null : { changeset: csNum, inclusive: true };
     cache = cache || { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
+    cache.contextRels = cache.contextRels || new Map();
     const budget = { remaining: 1000 };
     // pairs: {action, oldObj, newObj}; oldObj is null when the previous
     // version was not fetched (large changeset) and newObj is null for
@@ -1851,6 +1866,24 @@ if (typeof document !== "undefined") {
     const externalIds = [];
     for (const p of pairs) {
       for (const m of [...((p.oldObj && p.oldObj.members) || []), ...((p.newObj && p.newObj.members) || [])]) {
+        if (m.type !== "way") continue;
+        if (newWayRefs.has(m.ref) || oldWayRefs.has(m.ref)) continue;
+        if (!externalIds.includes(m.ref)) externalIds.push(m.ref);
+      }
+    }
+    // Context relations (prefill only): not changed themselves, but
+    // their members are — drawn grey on the overview for context.
+    // A context relation that is itself in the change is redundant:
+    // its members already draw from its pair.
+    const contextRels = [];
+    if (live && Array.isArray(context) && context.length) {
+      const pairRelIds = new Set(pairs.flatMap((p) => [p.oldObj, p.newObj]).filter((o) => o && o.type === "relation").map((o) => o.id));
+      const want = [...new Set(context.filter((c) => c.type === "relation" && Number.isFinite(c.id) && c.id >= 0).map((c) => c.id))].filter((id) => !pairRelIds.has(id));
+      const uncached = want.filter((id) => !cache.contextRels.has(id));
+      const got = await fetchAllChunked(uncached, async (id) => { try { return await fetchObject({ type: "relation", id }); } catch (e) { return null; } }, 10);
+      for (const id of uncached) cache.contextRels.set(id, got.get(id) || null);
+      for (const id of want) { const obj = cache.contextRels.get(id); if (obj) contextRels.push(obj); }
+      for (const r of contextRels) for (const m of r.members || []) {
         if (m.type !== "way") continue;
         if (newWayRefs.has(m.ref) || oldWayRefs.has(m.ref)) continue;
         if (!externalIds.includes(m.ref)) externalIds.push(m.ref);
@@ -1908,8 +1941,10 @@ if (typeof document !== "undefined") {
     };
     // Parent relations among the pairs (see wayParentMaps): a way's
     // own segment diff carries no membership, so without this a
-    // changed member way showed no "Member of" in its popup.
-    const parents = wayParentMaps(pairs);
+    // changed member way showed no "Member of" in its popup. Context
+    // relations join as unchanged pairs (old and new the same), so a
+    // changed way lists them too and a context-only way lists its own.
+    const parents = wayParentMaps([...pairs, ...contextRels.map((r) => ({ action: "modify", oldObj: r, newObj: r }))]);
     const parentFor = (wayId, kind) => {
       const primary = kind === "removed" ? parents.old.get(wayId) : parents.new.get(wayId);
       if (primary && primary.length) return primary;
@@ -1999,6 +2034,12 @@ if (typeof document !== "undefined") {
         }
       }
     }
+    // Context relations draw after the change, grey and unchanged:
+    // they are not part of the change, only its surroundings. A member
+    // way that is itself changed already drew its own segment diff
+    // above; the unchanged-skip in pushWayMembers keeps the grey
+    // member line from painting over it.
+    for (const r of contextRels) pushWayMembers(r.members, "new", "unchanged", null, r.id);
     return { drawables, truncated };
   }
   const OVERVIEW_KIND_LABEL = { added: "Added", removed: "Removed", unchanged: "Unchanged", kept: "Kept", old: "Old version", new: "New version", connector: "Moved" };
@@ -2052,12 +2093,16 @@ if (typeof document !== "undefined") {
         wrap.appendChild(via);
       }
     }
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "osmpr-popup-action";
-    btn.textContent = "Scroll to card";
-    btn.addEventListener("click", () => onPick(d));
-    wrap.appendChild(btn);
+    // No card, no scroll button: a context-only member way has no
+    // card to scroll to (its relation is display-only context).
+    if (d.target != null) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "osmpr-popup-action";
+      btn.textContent = "Scroll to card";
+      btn.addEventListener("click", () => onPick(d));
+      wrap.appendChild(btn);
+    }
     return wrap;
   }
   function addDrawablesToLayer(layers, drawables, onPick, plain) {
@@ -2155,7 +2200,7 @@ if (typeof document !== "undefined") {
     }
     return bounds;
   }
-  function buildOverviewMapView(pairs, cache, getCard, changesetId, emptyText, refitOnRefresh) {
+  function buildOverviewMapView(pairs, cache, getCard, changesetId, emptyText, refitOnRefresh, context) {
     const div = document.createElement("div");
     div.className = "panel mapview";
     div.appendChild(el("p", "Loading overview map…", "muted"));
@@ -2204,7 +2249,7 @@ if (typeof document !== "undefined") {
       if (loading) { queued = true; return; }
       loading = true;
       try {
-        const { drawables, truncated } = await collectOverviewDrawables(pairs, cache, changesetId);
+        const { drawables, truncated } = await collectOverviewDrawables(pairs, cache, changesetId, context);
         lastDrawables = drawables;
         const shown = overviewModeDrawables(drawables, mode);
         if (!drawables.length) {
@@ -2540,8 +2585,8 @@ if (typeof document !== "undefined") {
     // (each finished item appends its pair and refreshes the map).
     const overviewPairs = [];
     const overviewCards = [];
-    const overviewCache = { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map() };
-    const overview = buildOverviewMapView(overviewPairs, overviewCache, (i) => overviewCards[i], null, "No drawable geometry for these changes.", true);
+    const overviewCache = { coordsOld: new Map(), coordsNew: new Map(), externalOld: new Map(), externalNew: new Map(), contextRels: new Map() };
+    const overview = buildOverviewMapView(overviewPairs, overviewCache, (i) => overviewCards[i], null, "No drawable geometry for these changes.", true, prefill.context || []);
     $("preview").appendChild(overview);
     for (const change of prefill.changes) {
       const card = el("div", null, "obj");

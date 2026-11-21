@@ -42,6 +42,12 @@ assert.equal(simple.changes[0].version, 217);
 assert.equal(simple.changes[0].add.length, 2);
 assert.equal(simple.changes[0].add[1].role, "");
 assert.equal(simple.comment, "hi");
+assert.deepEqual(simple.context, [], "the simple format has no context");
+
+// --- parsePrefill: context relations (display-only) ---
+const ctxParsed = parsePrefill("?d=" + b64urlEncode(JSON.stringify({ comment: "c", changes: [], context: [{ type: "relation", id: 52796 }, 52798, { type: "way", id: 1 }, { type: "relation", id: "x" }, 52796] })));
+assert.deepEqual(ctxParsed.context, [{ type: "relation", id: 52796 }, { type: "relation", id: 52798 }], "relation objects and plain ids normalize; other types, bad ids and duplicates drop");
+assert.deepEqual(parsePrefill("?d=" + b64urlEncode(JSON.stringify({ comment: "c", changes: [] }))).context, [], "no context field means none");
 
 // --- member spec parsing ---
 assert.deepEqual(parseMemberSpec("r:900002:subarea"), { type: "relation", ref: 900002, role: "subarea" });
