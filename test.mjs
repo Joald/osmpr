@@ -11,8 +11,8 @@ assert(m, "no <script> block found in index.html");
 const src = m[1];
 // The page script uses top-level consts, which do not leak out of eval().
 // Run it as a function body and return the pure functions explicitly.
-const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables, overviewModeDrawables };")();
-const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables, overviewModeDrawables } = fns;
+const fns = new Function(src + "\nreturn { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables, overviewModeDrawables, wayParentMaps };")();
+const { b64urlEncode, b64urlDecode, escapeXml, memberKey, normType, parseMemberSpec, parsePrefill, applyOps, diffMembers, diffTags, diffChars, buildObjectXml, buildDeleteXml, buildOsmChange, buildDiffLines, transitiveClosureMembers, computeMemberGeometryEvents, waySegmentDiffDrawables, applyLiveNodeOverrides, styleOverlappingDrawables, overviewModeDrawables, wayParentMaps } = fns;
 
 // --- b64url roundtrip, incl. non-ASCII (changeset comments may be Polish) ---
 const pl = "Zażółć gęślą jaźń";
@@ -719,6 +719,22 @@ const omStandalone = { kind: "added", pts: [{ lat: 5, lon: 5 }], obj: { type: "n
 assert.deepEqual(overviewModeDrawables([omLine, omOnVertex, omStandalone], "after").map((d) => d.obj.id), [3, 10]);
 assert.deepEqual(overviewModeDrawables([omLine, { kind: "removed", pts: [stPts[1]], obj: { type: "node", id: 9 } }], "before").map((d) => d.obj.id), [3]);
 assert.deepEqual(overviewModeDrawables([omStandalone], "after").map((d) => d.obj.id), [10], "standalone node stays with no lines at all");
+
+// --- wayParentMaps: parent relations among the pairs, old vs new ---
+const wpPairs = [
+  { action: "modify", oldObj: { type: "relation", id: 52818, members: [{ type: "way", ref: 28445305, role: "outer" }, { type: "way", ref: 26557540, role: "outer" }] }, newObj: { type: "relation", id: 52818, members: [{ type: "way", ref: 28445305, role: "outer2" }, { type: "way", ref: 457539035, role: "outer" }] } },
+  { action: "create", oldObj: null, newObj: { type: "relation", id: 999, members: [{ type: "way", ref: -4, role: "outer" }] } },
+];
+const wp = wayParentMaps(wpPairs);
+assert.deepEqual(wp.old.get(28445305), { type: "relation", id: 52818 });
+assert.deepEqual(wp.new.get(28445305), { type: "relation", id: 52818 });
+assert.equal(wp.old.get(26557540).id, 52818, "removed member keeps its old parent");
+assert.equal(wp.new.get(26557540), undefined, "removed member has no new parent");
+assert.equal(wp.old.get(457539035), undefined, "added member has no old parent");
+assert.equal(wp.new.get(457539035).id, 52818, "added member gets its new parent");
+assert.deepEqual(wp.new.get(-4), { type: "relation", id: 999 }, "created relation's members map too");
+assert.deepEqual(wayParentMaps([]), { old: new Map(), new: new Map() });
+assert.deepEqual(wayParentMaps(null), { old: new Map(), new: new Map() });
 // Node markers use kinds "old"/"new", not "removed"/"added" — a
 // standalone moved node must survive the mode filter in both views
 // (this was the 2026-11-21 CHECK E failure: the old/new kinds were

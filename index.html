@@ -1011,6 +1011,22 @@ function overviewModeDrawables(drawables, mode) {
   return shown.filter((d) => !(d.pts && d.pts.length === 1 && hasCoords(d.pts[0]) && vertices.has(d.pts[0].lat.toFixed(7) + "," + d.pts[0].lon.toFixed(7))));
 }
 
+// Parent relations among the pairs, for the membership line in the
+// overview popup: a way's own segment diff does not know its
+// relations, so a changed member way showed no "Member of relation"
+// at all — its own drawables carry no via, and the member draws for
+// in-change ways had it nulled. Old side for removed geometry, new
+// side for added; a way in several relations keeps the first.
+function wayParentMaps(pairs) {
+  const oldMap = new Map(), newMap = new Map();
+  for (const p of pairs || []) {
+    const o = p.oldObj, n = p.newObj;
+    if (o && o.type === "relation") for (const m of o.members || []) if (m.type === "way" && !oldMap.has(m.ref)) oldMap.set(m.ref, { type: "relation", id: o.id });
+    if (n && n.type === "relation") for (const m of n.members || []) if (m.type === "way" && !newMap.has(m.ref)) newMap.set(m.ref, { type: "relation", id: n.id });
+  }
+  return { old: oldMap, new: newMap };
+}
+
 /* ================= browser UI (skipped under node) ================= */
 if (typeof document !== "undefined") {
   const $ = (id) => document.getElementById(id);
@@ -1896,23 +1912,31 @@ if (typeof document !== "undefined") {
           kind, pts,
           obj: { type: "way", id: m.ref },
           target: inChangeset ? pairIndexByWayId.get(m.ref) : relIndex,
-          via: inChangeset ? null : { type: "relation", id: relId },
+          // The way's own pair does not know its relations, so the
+          // member draw carries the membership for the popup — also
+          // for ways that are themselves in the change.
+          via: { type: "relation", id: relId },
         });
       }
     };
+    // Parent relations among the pairs (see wayParentMaps): a way's
+    // own segment diff carries no membership, so without this a
+    // changed member way showed no "Member of relation" in its popup.
+    const parents = wayParentMaps(pairs);
+    const parentFor = (wayId, kind) => kind === "removed" ? (parents.old.get(wayId) || parents.new.get(wayId) || null) : (parents.new.get(wayId) || parents.old.get(wayId) || null);
     for (let pi = 0; pi < pairs.length; pi++) {
       const p = pairs[pi];
       if (p.action === "create") {
         const o = p.newObj;
         if (!o) continue;
         if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "added", pts: [{ lat: o.lat, lon: o.lon }], obj: { type: o.type, id: o.id }, target: pi });
-        else if (o.type === "way") { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj: { type: o.type, id: o.id }, target: pi }); }
+        else if (o.type === "way") { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "added", pts, obj: { type: o.type, id: o.id }, target: pi, via: parentFor(o.id, "added") }); }
         else if (o.type === "relation") pushWayMembers(o.members, "new", "added", pi, o.id);
       } else if (p.action === "delete") {
         const o = p.oldObj;
         if (!o) continue;
         if (o.type === "node" && o.lat != null && o.lon != null) drawables.push({ kind: "removed", pts: [{ lat: o.lat, lon: o.lon }], obj: { type: o.type, id: o.id }, target: pi });
-        else if (o.type === "way") { const pts = lineOld(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts, obj: { type: o.type, id: o.id }, target: pi }); }
+        else if (o.type === "way") { const pts = lineOld(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "removed", pts, obj: { type: o.type, id: o.id }, target: pi, via: parentFor(o.id, "removed") }); }
         else if (o.type === "relation") pushWayMembers(o.members, "old", "removed", pi, o.id);
       } else {
         // modify
@@ -1937,8 +1961,8 @@ if (typeof document !== "undefined") {
             // "kept"). Unchanged geometry keeps the single grey line.
             const segs = waySegmentDiffDrawables(old.nodeRefs, cache.coordsOld, o.nodeRefs, cache.coordsNew);
             if (segs && segs.some((s) => s.kind !== "unchanged")) {
-              for (const s of segs) drawables.push({ kind: s.kind, pts: s.pts, obj, target: pi });
-            } else { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi }); }
+              for (const s of segs) drawables.push({ kind: s.kind, pts: s.pts, obj, target: pi, via: parentFor(o.id, s.kind) });
+            } else { const pts = lineNew(o.nodeRefs); if (pts.length >= 2) drawables.push({ kind: "unchanged", pts, obj, target: pi, via: parentFor(o.id, "unchanged") }); }
           }
         } else if (o.type === "relation") {
           const oldMembers = (old && old.members) || [];
