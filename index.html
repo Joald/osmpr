@@ -129,6 +129,12 @@
   .leaflet-popup-close-button { color: #9aa0a6 !important; padding: 8px 10px 0 0 !important; font-size: 16px !important; }
   .leaflet-tooltip.osmpr-tooltip { background: #1a1d21; color: #e8e8e8; border: 1px solid #2a2e33; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.45); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 0.85rem; padding: 4px 8px; }
   .leaflet-tooltip.osmpr-tooltip::before { display: none; }
+  /* Clicking a vector layer focuses its SVG element, and the browser
+     then draws its default focus outline around the element's bounding
+     box — a rectangle that follows no geometry at all. Leaflet 1.9.4
+     ships no rule against it, so kill it here; the popup is the click
+     feedback, and keyboard focus still works, it just draws nothing. */
+  .leaflet-interactive:focus { outline: none; }
   .osmpr-popup-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
   .osmpr-popup-title a { color: #7fb3e8; text-decoration: none; }
   .osmpr-popup-title a:hover { text-decoration: underline; }
