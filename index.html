@@ -1979,14 +1979,32 @@ if (typeof document !== "undefined") {
       const weight = d.weight || 3;
       const latlngs = pts.map((p) => [p.lat, p.lon]);
       bounds.push(...latlngs);
-      let layer = null;
+      let layer = null, closed = false;
       if (latlngs.length === 1) { if (d.kind !== "connector") layer = L.circleMarker(latlngs[0], { radius: 7, color, fillColor: color, fillOpacity: 0.9, weight: 2 }).addTo(layers); }
       else if (d.kind === "connector") layer = L.polyline(latlngs, { color, weight: 2, dashArray: "6 6" }).addTo(layers);
       else {
         const first = pts[0], last = pts[pts.length - 1];
-        const closed = first.lat === last.lat && first.lon === last.lon;
+        closed = first.lat === last.lat && first.lon === last.lon;
         if (closed) layer = L.polygon(latlngs, { color, weight, fillColor: color, fillOpacity: 0.15 }).addTo(layers);
         else layer = L.polyline(latlngs, { color, weight }).addTo(layers);
+      }
+      // Hover outline: a yellow halo behind the feature, so the hovered
+      // line, ring or dot stands out from its neighbours without
+      // changing its own colour. The halo is non-interactive, so it
+      // never blocks clicks or the tooltip; it is removed on mouseout.
+      if (layer) {
+        let halo = null;
+        const showHalo = () => {
+          if (halo) return;
+          if (latlngs.length === 1) halo = L.circleMarker(latlngs[0], { radius: 11, color: "#ffd60a", weight: 2, fillColor: "#ffd60a", fillOpacity: 0.3, interactive: false }).addTo(layers);
+          else if (closed) halo = L.polygon(latlngs, { color: "#ffd60a", weight: weight + 6, fill: false, interactive: false }).addTo(layers);
+          else halo = L.polyline(latlngs, { color: "#ffd60a", weight: weight + 6, opacity: 0.9, interactive: false }).addTo(layers);
+          halo.bringToBack();
+          layer.bringToFront();
+        };
+        const hideHalo = () => { if (halo) { layers.removeLayer(halo); halo = null; } };
+        layer.on("mouseover", showHalo);
+        layer.on("mouseout", hideHalo);
       }
       if (layer && d.obj && onPick) {
         layer.bindTooltip(d.obj.type + " " + d.obj.id, { className: "osmpr-tooltip" });
