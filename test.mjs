@@ -719,5 +719,18 @@ const omStandalone = { kind: "added", pts: [{ lat: 5, lon: 5 }], obj: { type: "n
 assert.deepEqual(overviewModeDrawables([omLine, omOnVertex, omStandalone], "after").map((d) => d.obj.id), [3, 10]);
 assert.deepEqual(overviewModeDrawables([omLine, { kind: "removed", pts: [stPts[1]], obj: { type: "node", id: 9 } }], "before").map((d) => d.obj.id), [3]);
 assert.deepEqual(overviewModeDrawables([omStandalone], "after").map((d) => d.obj.id), [10], "standalone node stays with no lines at all");
+// Node markers use kinds "old"/"new", not "removed"/"added" — a
+// standalone moved node must survive the mode filter in both views
+// (this was the 2026-11-21 CHECK E failure: the old/new kinds were
+// missing from the filter, so the dot vanished from Before/After
+// entirely), and drop only when it sits on a line's vertex.
+const omOld = { kind: "old", pts: [{ lat: 5, lon: 5 }], obj: { type: "node", id: 11 } };
+const omNew = { kind: "new", pts: [{ lat: 5, lon: 5 }], obj: { type: "node", id: 12 } };
+assert.deepEqual(overviewModeDrawables([omOld], "before").map((d) => d.obj.id), [11]);
+assert.deepEqual(overviewModeDrawables([omNew], "after").map((d) => d.obj.id), [12]);
+assert.deepEqual(overviewModeDrawables([omOld], "after"), [], "old marker is not in After");
+assert.deepEqual(overviewModeDrawables([omNew], "before"), [], "new marker is not in Before");
+assert.deepEqual(overviewModeDrawables([omLine, { kind: "old", pts: [stPts[1]], obj: { type: "node", id: 13 } }], "before").map((d) => d.obj.id), [3], "old marker on a vertex still drops");
+assert.deepEqual(overviewModeDrawables([omLine, { kind: "new", pts: [stPts[1]], obj: { type: "node", id: 14 } }], "after").map((d) => d.obj.id), [3], "new marker on a vertex still drops");
 
 console.log("All editor logic tests passed.");

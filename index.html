@@ -982,6 +982,9 @@ function styleOverlappingDrawables(drawables) {
 // (colorKind), so the map reads as the geometry itself, not the change.
 // Connectors (old→new) exist only in the diff. The original kind is
 // kept, so the click popup still says what the object is doing.
+// Node markers use kinds "old"/"new" (ways use "removed"/"added"), so
+// both pairs belong in the mode filter — otherwise a moved node would
+// vanish from Before/After entirely instead of showing its position.
 // A node marker sitting exactly on a drawn line's vertex is dropped in
 // a single-state view — the polygon already shows the position, so the
 // dot is only visual noise. A standalone node (a POI, not on any line)
@@ -989,7 +992,7 @@ function styleOverlappingDrawables(drawables) {
 function overviewModeDrawables(drawables, mode) {
   if (!drawables) return [];
   if (mode !== "before" && mode !== "after") return drawables;
-  const keep = mode === "before" ? new Set(["removed", "unchanged", "kept"]) : new Set(["added", "unchanged", "kept"]);
+  const keep = mode === "before" ? new Set(["removed", "old", "unchanged", "kept"]) : new Set(["added", "new", "unchanged", "kept"]);
   const shown = drawables.filter((d) => keep.has(d.kind)).map((d) => ({ ...d, colorKind: "unchanged" }));
   const vertices = new Set();
   for (const d of shown) {
