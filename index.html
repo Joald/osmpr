@@ -1953,10 +1953,13 @@ if (typeof document !== "undefined") {
     wrap.appendChild(btn);
     return wrap;
   }
-  function addDrawablesToLayer(layers, drawables, onPick) {
+  function addDrawablesToLayer(layers, drawables, onPick, plain) {
     // Coincident lines are styled as nested casings first, so each
     // stays visible and clickable instead of hiding under the top one.
-    drawables = styleOverlappingDrawables(drawables);
+    // In a single-state view (Before/After) every line is the same grey
+    // and the same state, so casings would convey nothing and only make
+    // random stretches thicker — plain mode draws them all at weight 3.
+    if (!plain) drawables = styleOverlappingDrawables(drawables);
     const bounds = [];
     for (const d of drawables) {
       // Last line of defence: drop points without real coordinates, so
@@ -2026,7 +2029,7 @@ if (typeof document !== "undefined") {
       for (const [k, b] of Object.entries(modeBtns)) b.classList.toggle("secondary", k !== mode);
       const shown = overviewModeDrawables(lastDrawables, mode);
       mapState.layers.clearLayers();
-      addDrawablesToLayer(mapState.layers, shown, scrollToCard);
+      addDrawablesToLayer(mapState.layers, shown, scrollToCard, mode !== "diff");
     };
     div.load = async () => {
       if (loading) { queued = true; return; }
@@ -2052,7 +2055,7 @@ if (typeof document !== "undefined") {
           const map = L.map(mapDiv);
           L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
           const layers = L.layerGroup().addTo(map);
-          const bounds = addDrawablesToLayer(layers, shown, scrollToCard);
+          const bounds = addDrawablesToLayer(layers, shown, scrollToCard, mode !== "diff");
           if (bounds.length) {
             map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
             map.invalidateSize();
@@ -2065,7 +2068,7 @@ if (typeof document !== "undefined") {
           }
         } else {
           mapState.layers.clearLayers();
-          const bounds = addDrawablesToLayer(mapState.layers, shown, scrollToCard);
+          const bounds = addDrawablesToLayer(mapState.layers, shown, scrollToCard, mode !== "diff");
           // Prefill pairs arrive one card at a time, so the first fit
           // only covers the first object; refit when later geometry
           // lands outside the current viewport (same rule as the
