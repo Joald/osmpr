@@ -982,11 +982,20 @@ function styleOverlappingDrawables(drawables) {
 // (colorKind), so the map reads as the geometry itself, not the change.
 // Connectors (old→new) exist only in the diff. The original kind is
 // kept, so the click popup still says what the object is doing.
+// A node marker sitting exactly on a drawn line's vertex is dropped in
+// a single-state view — the polygon already shows the position, so the
+// dot is only visual noise. A standalone node (a POI, not on any line)
+// stays: there the marker IS the geometry.
 function overviewModeDrawables(drawables, mode) {
   if (!drawables) return [];
   if (mode !== "before" && mode !== "after") return drawables;
   const keep = mode === "before" ? new Set(["removed", "unchanged", "kept"]) : new Set(["added", "unchanged", "kept"]);
-  return drawables.filter((d) => keep.has(d.kind)).map((d) => ({ ...d, colorKind: "unchanged" }));
+  const shown = drawables.filter((d) => keep.has(d.kind)).map((d) => ({ ...d, colorKind: "unchanged" }));
+  const vertices = new Set();
+  for (const d of shown) {
+    if (d.pts && d.pts.length >= 2) for (const p of d.pts) if (hasCoords(p)) vertices.add(p.lat.toFixed(7) + "," + p.lon.toFixed(7));
+  }
+  return shown.filter((d) => !(d.pts && d.pts.length === 1 && hasCoords(d.pts[0]) && vertices.has(d.pts[0].lat.toFixed(7) + "," + d.pts[0].lon.toFixed(7))));
 }
 
 /* ================= browser UI (skipped under node) ================= */

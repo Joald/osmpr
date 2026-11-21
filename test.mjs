@@ -701,12 +701,23 @@ const omIn = [
 ];
 assert.equal(overviewModeDrawables(omIn, "diff"), omIn);
 assert.deepEqual(overviewModeDrawables(omIn, "before").map((d) => d.kind), ["removed", "kept", "unchanged", "removed"]);
-assert.deepEqual(overviewModeDrawables(omIn, "after").map((d) => d.kind), ["added", "kept", "unchanged", "added"]);
+// The added node at (0, 0) drops in "after": it sits exactly on the
+// line's vertex, so the polygon already shows the position.
+assert.deepEqual(overviewModeDrawables(omIn, "after").map((d) => d.kind), ["added", "kept", "unchanged"]);
 const omBefore = overviewModeDrawables(omIn, "before");
 assert.ok(omBefore.every((d) => d.colorKind === "unchanged"));
 assert.equal(omBefore[0].obj.id, 1, "original kind and object survive the copy");
 assert.equal(overviewModeDrawables(omIn, "bogus"), omIn, "unknown mode falls back to diff");
 assert.deepEqual(overviewModeDrawables([], "before"), []);
 assert.deepEqual(overviewModeDrawables(null, "after"), []);
+// A node marker on a line's vertex is dropped in Before/After, while a
+// standalone node (a POI, not on any line) stays — there the marker IS
+// the geometry.
+const omLine = { kind: "unchanged", pts: stPts, obj: { type: "way", id: 3 } };
+const omOnVertex = { kind: "added", pts: [stPts[1]], obj: { type: "node", id: 9 } };
+const omStandalone = { kind: "added", pts: [{ lat: 5, lon: 5 }], obj: { type: "node", id: 10 } };
+assert.deepEqual(overviewModeDrawables([omLine, omOnVertex, omStandalone], "after").map((d) => d.obj.id), [3, 10]);
+assert.deepEqual(overviewModeDrawables([omLine, { kind: "removed", pts: [stPts[1]], obj: { type: "node", id: 9 } }], "before").map((d) => d.obj.id), [3]);
+assert.deepEqual(overviewModeDrawables([omStandalone], "after").map((d) => d.obj.id), [10], "standalone node stays with no lines at all");
 
 console.log("All editor logic tests passed.");
