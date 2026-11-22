@@ -147,7 +147,7 @@
   .osmpr-popup-via { color: #9aa0a6; font-size: 0.85rem; margin: 0 0 10px; }
   .osmpr-popup-via a { color: #7fb3e8; text-decoration: none; }
   .osmpr-popup-via a:hover { text-decoration: underline; }
-  /* The "Member of" name is a button that selects the relation on
+  /* The "Member of" id is a button that selects the relation on
      the map, so it is styled like the popup's links. It stays an
      inline element: the full-width rule below is only for the
      popup's action button, and a full-width centred button made the
@@ -156,8 +156,31 @@
   .osmpr-popup-via button:hover { text-decoration: underline; }
   .osmpr-popup-action { width: 100%; }
   /* Every link that leaves the page for openstreetmap.org carries a
-     small external arrow, so it reads as an exit, not navigation. */
-  a.osmpr-ext::after, .leaflet-control-attribution a::after { content: " \2197"; }
+     proper external-link icon (box with an arrow), not a unicode
+     glyph: a mask over currentColor, so it follows the link colour
+     everywhere, including Leaflet's attribution links. */
+  a.osmpr-ext::after, .leaflet-control-attribution a::after {
+    content: "";
+    display: inline-block;
+    width: 0.75em; height: 0.75em;
+    margin-left: 0.15em;
+    vertical-align: -0.05em;
+    background-color: currentColor;
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 3h6v6'/%3E%3Cpath d='M10 14 21 3'/%3E%3Cpath d='M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'/%3E%3C/svg%3E");
+    -webkit-mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 3h6v6'/%3E%3Cpath d='M10 14 21 3'/%3E%3Cpath d='M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6'/%3E%3C/svg%3E");
+    mask-size: contain;
+    mask-repeat: no-repeat;
+    mask-position: center;
+  }
+  /* Mini clipboard button before an object id in a popup: copies the
+     id, then shows a check for a moment. The via-qualified selector
+     beats the popup's link-styled button rule on colour and padding. */
+  .osmpr-copy, .osmpr-popup-via button.osmpr-copy { background: none; border: none; border-radius: 0; padding: 1px 2px; margin: 0 1px; cursor: pointer; color: inherit; line-height: 0; vertical-align: -0.1em; }
+  .osmpr-copy:hover { opacity: 0.7; background: none; }
+  .osmpr-copy svg { width: 0.85em; height: 0.85em; }
 </style>
 </head>
 <body>
@@ -1719,11 +1742,11 @@ if (typeof document !== "undefined") {
     div.appendChild(mapDiv);
     await loadLeaflet();
     const map = L.map(mapDiv);
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 22, maxNativeZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
     const layers = L.layerGroup().addTo(map);
     const bounds = addDrawablesToLayer(layers, drawables);
     if (!bounds.length) { map.remove(); div.innerHTML = ""; div.appendChild(el("p", emptyText, "muted")); return; }
-    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+    map.fitBounds(bounds, { padding: [30, 30], maxZoom: 20 });
     map.invalidateSize();
     div._osmprMap = { map, layers, fittedBounds: map.getBounds(), fittedZoom: map.getZoom() };
     // A container resize is not the user moving the map: re-baseline the
@@ -1753,7 +1776,7 @@ if (typeof document !== "undefined") {
     // still shows the view the last programmatic fit produced.
     const userMoved = state.fittedBounds != null && (map.getZoom() !== state.fittedZoom || !map.getBounds().equals(state.fittedBounds));
     if (!userMoved && !map.getBounds().contains(L.latLngBounds(bounds))) {
-      map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+      map.fitBounds(bounds, { padding: [30, 30], maxZoom: 20 });
       state.fittedBounds = map.getBounds();
       state.fittedZoom = map.getZoom();
     }
@@ -2043,21 +2066,61 @@ if (typeof document !== "undefined") {
     return { drawables, truncated };
   }
   const OVERVIEW_KIND_LABEL = { added: "Added", removed: "Removed", unchanged: "Unchanged", kept: "Kept", old: "Old version", new: "New version", connector: "Moved" };
+  // Mini clipboard button: copies an object id, then shows a check
+  // for a moment. Stops propagation so the click never reaches the map.
+  const COPY_ICON_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"8\" height=\"4\" x=\"8\" y=\"2\" rx=\"1\" ry=\"1\"/><path d=\"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2\"/></svg>";
+  const CHECK_ICON_SVG = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 6 9 17l-5-5\"/></svg>";
+  function copyIdButton(id) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "osmpr-copy";
+    b.title = "Copy id";
+    b.setAttribute("aria-label", "Copy " + id);
+    b.innerHTML = COPY_ICON_SVG;
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      let copied = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(String(id)); copied = true; }
+      } catch (err) { /* fall through to the textarea path */ }
+      if (!copied) {
+        const ta = document.createElement("textarea");
+        ta.value = String(id);
+        document.body.appendChild(ta);
+        ta.select();
+        try { copied = document.execCommand("copy"); } catch (e2) { /* copy failed */ }
+        ta.remove();
+      }
+      if (copied) {
+        b.innerHTML = CHECK_ICON_SVG;
+        setTimeout(() => { b.innerHTML = COPY_ICON_SVG; }, 1200);
+      }
+    });
+    return b;
+  }
   function osmObjectLink(obj) {
+    // Only the id itself is the link; the type word is plain text,
+    // and a mini clipboard button before the id copies it.
+    const wrap = document.createElement("span");
+    wrap.appendChild(document.createTextNode(obj.type + " "));
+    wrap.appendChild(copyIdButton(obj.id));
+    wrap.appendChild(document.createTextNode(" "));
     if (obj.id < 0) {
       // Placeholder: no OSM page yet, so plain text, not a link to a
       // page that would 404.
       const s = document.createElement("span");
       s.className = "add";
-      s.textContent = obj.type + " " + obj.id;
-      return s;
+      s.textContent = String(obj.id);
+      wrap.appendChild(s);
+      return wrap;
     }
     const a = document.createElement("a");
     a.href = "https://www.openstreetmap.org/" + obj.type + "/" + obj.id;
     a.target = "_blank"; a.rel = "noopener";
     a.className = "osmpr-ext";
-    a.textContent = obj.type + " " + obj.id;
-    return a;
+    a.textContent = String(obj.id);
+    wrap.appendChild(a);
+    return wrap;
   }
   // Click popup for an overview drawable: what the object is, and a
   // button that scrolls to its card. Clicking the map element itself
@@ -2078,9 +2141,12 @@ if (typeof document !== "undefined") {
       for (const rel of d.via) {
         const via = document.createElement("div");
         via.className = "osmpr-popup-via";
+        via.appendChild(document.createTextNode("Member of "));
+        via.appendChild(copyIdButton(rel.id));
+        via.appendChild(document.createTextNode(" "));
         const sel = document.createElement("button");
         sel.type = "button";
-        sel.textContent = "Member of " + rel.id;
+        sel.textContent = String(rel.id);
         sel.addEventListener("click", () => { if (onSelectRelation) onSelectRelation(rel.id); });
         via.appendChild(sel);
         via.appendChild(document.createTextNode(" "));
@@ -2267,11 +2333,11 @@ if (typeof document !== "undefined") {
           div.appendChild(mapDiv);
           await loadLeaflet();
           const map = L.map(mapDiv);
-          L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
+          L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 22, maxNativeZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
           const layers = L.layerGroup().addTo(map);
           const bounds = addDrawablesToLayer(layers, shown, scrollToCard, mode !== "diff");
           if (bounds.length) {
-            map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+            map.fitBounds(bounds, { padding: [30, 30], maxZoom: 20 });
             map.invalidateSize();
             mapState = { map, layers, note: null };
             if (truncated) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
@@ -2289,7 +2355,7 @@ if (typeof document !== "undefined") {
           // per-card maps). Changeset view keeps the old behaviour:
           // its pairs are complete from the first load, so a refresh
           // must never yank pan/zoom.
-          if (refitOnRefresh && bounds.length && !mapState.map.getBounds().contains(L.latLngBounds(bounds))) mapState.map.fitBounds(bounds, { padding: [30, 30], maxZoom: 18 });
+          if (refitOnRefresh && bounds.length && !mapState.map.getBounds().contains(L.latLngBounds(bounds))) mapState.map.fitBounds(bounds, { padding: [30, 30], maxZoom: 20 });
           if (truncated && !mapState.note) { mapState.note = el("p", "Some relation member ways omitted (over 200 external ways).", "muted small"); div.appendChild(mapState.note); }
         }
         div.dataset.drawn = "1";
