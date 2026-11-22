@@ -135,6 +135,20 @@
      ships no rule against it, so kill it here; the popup is the click
      feedback, and keyboard focus still works, it just draws nothing. */
   .leaflet-interactive:focus { outline: none; }
+  /* Dark map: the page is dark, but Leaflet's OSM tiles are light, so
+     the map was the one bright rectangle left. Darken the tile layer
+     with a filter — invert + hue-rotate keeps water blue-ish and roads
+     readable — and style Leaflet's controls dark to match. The filter
+     sits on the tile pane only: the drawn boundary geometry lives in
+     the overlay pane, so its colours (orange/green/red) are untouched.
+     !important on the controls because Leaflet's CSS loads from the CDN
+     at first map open, after this <style>. */
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.92); }
+  .leaflet-bar a { background: #1a1d21 !important; color: #e8e8e8 !important; border-bottom: 1px solid #2a2e33 !important; }
+  .leaflet-bar a:hover { background: #2a2e33 !important; color: #fff !important; }
+  .leaflet-control-zoom { border: 1px solid #2a2e33 !important; box-shadow: 0 1px 5px rgba(0,0,0,0.5) !important; }
+  .leaflet-control-attribution { background: rgba(26,29,33,0.85) !important; color: #9aa0a6 !important; }
+  .leaflet-control-attribution a { color: #7fb3e8 !important; }
   .osmpr-popup-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 4px; }
   .osmpr-popup-title a { color: #7fb3e8; text-decoration: none; }
   .osmpr-popup-title a:hover { text-decoration: underline; }
