@@ -96,6 +96,7 @@
   ul.diff li { padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
   .add { color: #7ee787; }
   .del { color: #ff7b72; }
+  .kept { color: #ffa657; }
   .note { color: #e3b341; }
   details { margin: 8px 0; }
   summary { cursor: pointer; }
@@ -159,6 +160,7 @@
   .osmpr-kind.kept { background: rgba(255,166,87,0.15); color: #ffa657; }
   .osmpr-kind.connector { background: rgba(227,179,65,0.15); color: #e3b341; }
   .osmpr-popup-via { color: #9aa0a6; font-size: 0.85rem; margin: 0 0 10px; }
+  .osmpr-popup-role { color: #9aa0a6; font-size: 0.85rem; margin: 0 0 10px; }
   .osmpr-popup-via a { color: #7fb3e8; text-decoration: none; }
   .osmpr-popup-via a:hover { text-decoration: underline; }
   /* The "Member of" id is a button that selects the relation on
@@ -725,7 +727,21 @@ function diffMembers(oldMembers, newMembers) {
     seen.set(k, already + 1);
     if (already >= (newCounts.get(k) || 0)) removed.push(m);
   }
-  return { added, removed, unchangedCount };
+  // A member that survives with a different role is a role change,
+  // not a removal plus an addition: pair added and removed entries
+  // with the same type and ref (first unused each). The pairing
+  // follows the new order; a leftover added copy stays added and a
+  // leftover removed copy stays removed.
+  const roleChanged = [];
+  const stillAdded = [];
+  for (const m of added) {
+    const i = removed.findIndex((r) => r.type === m.type && r.ref === m.ref);
+    if (i >= 0) {
+      const old = removed.splice(i, 1)[0];
+      roleChanged.push({ type: m.type, ref: m.ref, from: old.role || "", to: m.role || "" });
+    } else stillAdded.push(m);
+  }
+  return { added: stillAdded, removed, unchangedCount, roleChanged };
 }
 function diffTags(oldTags, newTags) {
   const out = [];
@@ -1216,6 +1232,25 @@ if (typeof document !== "undefined") {
     li.appendChild(document.createTextNode(m.type + " "));
     li.appendChild(osmLink(m.type, m.ref));
     li.appendChild(document.createTextNode(" (" + (m.role || "no role") + ")"));
+    return li;
+  }
+  // One line for a member whose role changed: the id links out, the
+  // old role is struck through in red, the new role is green.
+  function roleChangeLi(r) {
+    const li = el("li", null, null);
+    li.appendChild(document.createTextNode(r.type + " "));
+    li.appendChild(osmLink(r.type, r.ref));
+    li.appendChild(document.createTextNode(" ("));
+    const oldS = document.createElement("span");
+    oldS.className = "del"; oldS.style.textDecoration = "line-through";
+    oldS.textContent = r.from || "no role";
+    li.appendChild(oldS);
+    li.appendChild(document.createTextNode(" -> "));
+    const newS = document.createElement("span");
+    newS.className = "add";
+    newS.textContent = r.to || "no role";
+    li.appendChild(newS);
+    li.appendChild(document.createTextNode(")"));
     return li;
   }
   function charDiffSpans(ops, want) {
@@ -1711,8 +1746,16 @@ if (typeof document !== "undefined") {
           if (segs) drawables.push(...segs);
         }
       }
-      for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m))) pushMember(m, "removed", geomOld);
-      for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m))) pushMember(m, "added", geomNew);
+      // A member that survives with a different role draws once as
+      // "kept" (orange) on the new side — not as a removed + added
+      // pair of the same geometry.
+      const oldByRef = new Map((oldObj.members || []).map((m) => [m.type + ":" + m.ref, m]));
+      const roleChangedNew = (newObj.members || []).filter((m) => { const om = oldByRef.get(m.type + ":" + m.ref); return om && (om.role || "") !== (m.role || ""); });
+      const roleChangedOldKeys = new Set(roleChangedNew.map((m) => memberKey(oldByRef.get(m.type + ":" + m.ref))));
+      const roleChangedNewKeys = new Set(roleChangedNew.map(memberKey));
+      for (const m of roleChangedNew) pushMember(m, "kept", geomNew);
+      for (const m of oldObj.members || []) if (!newKeys.has(memberKey(m)) && !roleChangedOldKeys.has(memberKey(m))) pushMember(m, "removed", geomOld);
+      for (const m of newObj.members || []) if (!oldKeys.has(memberKey(m)) && !roleChangedNewKeys.has(memberKey(m))) pushMember(m, "added", geomNew);
       // opts.highlightNode (member-change view): a moved node member
       // draws as old (red) and new (green) points with a connector,
       // the same pattern as the node branch above.
@@ -1992,7 +2035,7 @@ if (typeof document !== "undefined") {
     // on the map can say what it is and scroll to its card. A member way
     // that is itself in the changeset targets its own card; an external
     // member way targets the relation's card and notes the relation.
-    const pushWayMembers = (members, which, kind, relIndex, relId) => {
+    const pushWayMembers = (members, which, kind, relIndex, relId, roleChanges) => {
       for (const m of members || []) {
         if (m.type !== "way") continue;
         const inChangeset = pairIndexByWayId.has(m.ref);
@@ -2002,7 +2045,10 @@ if (typeof document !== "undefined") {
         // added green segments would vanish under the grey chord.
         // Added and removed member draws still go through: they carry
         // the membership change, which the way's own pair does not show.
-        if (kind === "unchanged" && inChangeset) continue;
+        // A role-change draw skips for the same reason as an unchanged
+        // one: the way's own segment diff is the more precise draw,
+        // and the role change stays visible in the card text.
+        if (inChangeset && (kind === "unchanged" || roleChanges)) continue;
         const pts = memberPts(m, which);
         if (!pts) continue;
         // The membership lines in the popup list every parent relation
@@ -2017,6 +2063,8 @@ if (typeof document !== "undefined") {
           // member draw carries the membership for the popup — also
           // for ways that are themselves in the change.
           via: viaList,
+          // A role-only change: {from, to}; the popup shows it.
+          roleChange: roleChanges ? roleChanges.get(memberKey(m)) : undefined,
         });
       }
     };
@@ -2065,9 +2113,18 @@ if (typeof document !== "undefined") {
           const newMembers = o.members || [];
           const oldKeys = new Set(oldMembers.map(memberKey));
           const newKeys = new Set(newMembers.map(memberKey));
+          // A member that survives with a different role draws once
+          // as "kept" (orange) on the new side, with the role change
+          // in its popup — not as a removed + added pair.
+          const oldByRef = new Map(oldMembers.map((m) => [m.type + ":" + m.ref, m]));
+          const roleChangedNew = newMembers.filter((m) => { const om = oldByRef.get(m.type + ":" + m.ref); return om && (om.role || "") !== (m.role || ""); });
+          const roleChangedOldKeys = new Set(roleChangedNew.map((m) => memberKey(oldByRef.get(m.type + ":" + m.ref))));
+          const roleChangedNewKeys = new Set(roleChangedNew.map(memberKey));
+          const roleChangeMap = new Map(roleChangedNew.map((m) => [memberKey(m), { from: oldByRef.get(m.type + ":" + m.ref).role || "", to: m.role || "" }]));
           pushWayMembers(newMembers.filter((m) => oldKeys.has(memberKey(m))), "new", "unchanged", pi, o.id);
-          pushWayMembers(oldMembers.filter((m) => !newKeys.has(memberKey(m))), "old", "removed", pi, o.id);
-          pushWayMembers(newMembers.filter((m) => !oldKeys.has(memberKey(m))), "new", "added", pi, o.id);
+          pushWayMembers(oldMembers.filter((m) => !newKeys.has(memberKey(m)) && !roleChangedOldKeys.has(memberKey(m))), "old", "removed", pi, o.id);
+          pushWayMembers(newMembers.filter((m) => !oldKeys.has(memberKey(m)) && !roleChangedNewKeys.has(memberKey(m))), "new", "added", pi, o.id);
+          pushWayMembers(roleChangedNew, "new", "kept", pi, o.id, roleChangeMap);
         }
       }
     }
@@ -2149,6 +2206,21 @@ if (typeof document !== "undefined") {
     badge.textContent = OVERVIEW_KIND_LABEL[d.kind] || d.kind;
     title.appendChild(badge);
     wrap.appendChild(title);
+    if (d.roleChange) {
+      const rc = document.createElement("div");
+      rc.className = "osmpr-popup-role";
+      rc.appendChild(document.createTextNode("Role: "));
+      const oldS = document.createElement("span");
+      oldS.className = "del"; oldS.style.textDecoration = "line-through";
+      oldS.textContent = d.roleChange.from || "no role";
+      rc.appendChild(oldS);
+      rc.appendChild(document.createTextNode(" -> "));
+      const newS = document.createElement("span");
+      newS.className = "add";
+      newS.textContent = d.roleChange.to || "no role";
+      rc.appendChild(newS);
+      wrap.appendChild(rc);
+    }
     if (d.via && d.via.length) {
       // A way can belong to several relations: one line each, every
       // one selectable on the map, OSM a separate external link.
@@ -2753,7 +2825,7 @@ if (typeof document !== "undefined") {
     const previewView = document.createElement("div");
     if (c.type === "relation") {
       const d = diffMembers(cur.members, comp.members);
-      if (d.added.length || d.removed.length) {
+      if (d.added.length || d.removed.length || d.roleChanged.length) {
         const content = [];
         if (d.added.length) {
           content.push(el("p", "Added:", "add"));
@@ -2765,6 +2837,12 @@ if (typeof document !== "undefined") {
           content.push(el("p", "Removed:", "del"));
           const ul = el("ul", null, "diff");
           for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
+          content.push(ul);
+        }
+        if (d.roleChanged.length) {
+          content.push(el("p", "Role changed:", "kept"));
+          const ul = el("ul", null, "diff");
+          for (const r of d.roleChanged) ul.appendChild(roleChangeLi(r));
           content.push(ul);
         }
         previewView.appendChild(section("Members: " + cur.members.length + " -> " + comp.members.length, content));
@@ -2932,7 +3010,7 @@ if (typeof document !== "undefined") {
     const previewView = document.createElement("div");
     if (obj.type === "relation") {
       const d = diffMembers(oldMembers, newMembers);
-      if (d.added.length || d.removed.length) {
+      if (d.added.length || d.removed.length || d.roleChanged.length) {
         const content = [];
         if (d.added.length) {
           content.push(el("p", "Added:", "add"));
@@ -2944,6 +3022,12 @@ if (typeof document !== "undefined") {
           content.push(el("p", "Removed:", "del"));
           const ul = el("ul", null, "diff");
           for (const m of d.removed) ul.appendChild(memberLi("-", m, "del"));
+          content.push(ul);
+        }
+        if (d.roleChanged.length) {
+          content.push(el("p", "Role changed:", "kept"));
+          const ul = el("ul", null, "diff");
+          for (const r of d.roleChanged) ul.appendChild(roleChangeLi(r));
           content.push(ul);
         }
         previewView.appendChild(section("Members: " + oldMembers.length + " -> " + newMembers.length, content));
@@ -2966,7 +3050,7 @@ if (typeof document !== "undefined") {
     if (gp) previewView.appendChild(gp);
     const md = obj.type === "relation" ? diffMembers(oldMembers, newMembers) : null;
     const geomChanged = action === "create" || action === "delete" || (oldObj && newObj && (obj.type === "node" ? (oldObj.lat !== newObj.lat || oldObj.lon !== newObj.lon) : obj.type === "way" ? JSON.stringify(oldObj.nodeRefs || null) !== JSON.stringify(newObj.nodeRefs || null) : false));
-    if (!td.length && (!md || (!md.added.length && !md.removed.length)) && !geomChanged) previewView.appendChild(el("p", "No differences", "muted"));
+    if (!td.length && (!md || (!md.added.length && !md.removed.length && !md.roleChanged.length)) && !geomChanged) previewView.appendChild(el("p", "No differences", "muted"));
     const diffView = buildDiffPanel(oldTags, oldMembers, newTags, newMembers, obj.type === "relation", mapOld || emptyObj, mapNew || emptyObj);
     const csNum = changesetId == null ? null : parseInt(changesetId, 10);
     const mapView = buildMapView(mapOld || emptyObj, mapNew || emptyObj, csNum == null || !Number.isFinite(csNum) ? null : { old: { changeset: csNum, inclusive: false }, new: { changeset: csNum, inclusive: true } });
@@ -3374,6 +3458,7 @@ if (typeof document !== "undefined") {
         const ul = el("ul", null, "diff");
         for (const m of dm.added) ul.appendChild(memberLi("+", m, "add"));
         for (const m of dm.removed) ul.appendChild(memberLi("-", m, "del"));
+        for (const r of dm.roleChanged) ul.appendChild(roleChangeLi(r));
         for (const t of dt) ul.appendChild(tagChangeLi(t));
         if (!ul.children.length && !s.geometryChanged) ul.appendChild(el("li", "No member or tag changes.", "muted"));
         ch.appendChild(ul);
